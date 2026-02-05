@@ -7,19 +7,49 @@ import 'screens/admin/admin_dashboard.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/env.dart';
+import 'core/debug_logger.dart';
+import 'core/error_handler.dart';
+import 'screens/debug/debug_screen.dart';
 import 'repositories/auth_repository.dart';
 import 'repositories/profiles_repository.dart';
 import 'services/room_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load(fileName: '.env');
-  if (Env.isConfigured) {
-    await Supabase.initialize(url: Env.supabaseUrl, anonKey: Env.supabaseAnonKey);
-    // Initialize RoomService to load rooms from Supabase
-    await RoomService.instance.initialize();
+  
+  // Initialize debugging first
+  await logger.logAppStart();
+  ErrorHandler().initialize();
+  
+  try {
+    await dotenv.load(fileName: '.env');
+    logger.info('Environment variables loaded', tag: 'Main');
+    
+    if (Env.isConfigured) {
+      logger.info('Supabase configuration found, initializing...', tag: 'Main');
+      await Supabase.initialize(url: Env.supabaseUrl, anonKey: Env.supabaseAnonKey);
+      logger.info('Supabase initialized successfully', tag: 'Main');
+      
+      // Initialize RoomService to load rooms from Supabase
+      logger.info('Initializing RoomService...', tag: 'Main');
+      await RoomService.instance.initialize();
+      logger.info('RoomService initialized successfully', tag: 'Main');
+    } else {
+      logger.warning('Supabase not configured - running in offline mode', tag: 'Main');
+    }
+    
+    logger.info('App initialization complete', tag: 'Main');
+    runApp(const MyApp());
+  } catch (e, stackTrace) {
+    logger.fatal('Failed to initialize app', 
+      tag: 'Main',
+      error: e,
+      stackTrace: stackTrace
+    );
+    
+    // Still run the app even if initialization fails
+    runApp(const MyApp());
   }
-  runApp(const MyApp());
 }
 
 class RegisterScreen extends StatefulWidget {
@@ -300,10 +330,106 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'GABAY',
+      builder: (context, child) {
+        // Set custom error widget for better debugging
+        ErrorWidget.builder = (FlutterErrorDetails details) {
+          logger.logAppError(details);
+          return GabayErrorWidget(details: details);
+        };
+        return child!;
+      },
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.lightBlue),
       ),
       home: const MyHomePage(title: 'GABAY'),
+    );
+  }
+}
+
+class GabayErrorWidget extends StatelessWidget {
+  final FlutterErrorDetails details;
+
+  const GabayErrorWidget({super.key, required this.details});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF1E2931),
+      appBar: AppBar(
+        title: const Text('Error Occurred'),
+        backgroundColor: const Color(0xFFB91C1C),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'An error occurred while running the app:',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              details.exception.toString(),
+              style: const TextStyle(color: Colors.red),
+            ),
+            const SizedBox(height: 16),
+            if (details.context != null)
+              Text(
+                details.context.toString(),
+                style: const TextStyle(color: Colors.white70),
+              ),
+            const SizedBox(height: 16),
+            const Text(
+              'Stack Trace:',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: SingleChildScrollView(
+                child: Text(
+                  details.stack?.toString() ?? 'No stack trace available',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      // Restart the app
+                      runApp(const MyApp());
+                    },
+                    child: const Text('Restart App'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const DebugScreen(),
+                        ),
+                      );
+                    },
+                    child: const Text('View Logs'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -398,21 +524,18 @@ class _SignUpScreenState extends State<SignUpScreen> {
   bool rememberMe = true;
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  final _confirmPasswordController = TextEditingController();
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
-    _confirmPasswordController.dispose();
     super.dispose();
   }
 
   bool get _canLogin {
     final email = _emailController.text.trim();
     final pass = _passwordController.text.trim();
-    final cpass = _confirmPasswordController.text.trim();
-    return email.isNotEmpty && pass.isNotEmpty && cpass.isNotEmpty && pass == cpass;
+    return email.isNotEmpty && pass.isNotEmpty;
   }
 
   InputDecoration _roundedInputDecoration({required String hint, required Widget icon}) {
@@ -518,23 +641,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
                               ),
                             ),
                             const SizedBox(height: 24),
-                            TextField(
-                              style: const TextStyle(color: Colors.white),
-                              cursorColor: Colors.white,
-                              controller: _confirmPasswordController,
-                              obscureText: true,
-                              onChanged: (_) => setState(() {}),
-                              decoration: _roundedInputDecoration(
-                                hint: 'Confirm Password',
-                                icon: SvgPicture.asset('assets/icon/password.svg', width: 22, height: 22, color: Colors.white),
-                              ).copyWith(
-                                errorText: (_confirmPasswordController.text.isNotEmpty &&
-                                        _passwordController.text.trim() != _confirmPasswordController.text.trim())
-                                    ? 'Passwords do not match'
-                                    : null,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
                             Row(
                               children: [
                                 Checkbox(

@@ -13,6 +13,7 @@ import '../room_scanner/room_scanner_screen.dart';
 import '../news/news_feed_screen.dart';
 import '../emergency/emergency_screen.dart';
 import '../dept_hours/dept_hours_screen.dart';
+import '../../widgets/debug_fab.dart';
  
 class HomeDashboard extends StatelessWidget {
   const HomeDashboard({super.key, this.userName = 'Gonzalo Chuan'});
@@ -25,6 +26,7 @@ class HomeDashboard extends StatelessWidget {
     final cardHeight = screenH < 700 ? 184.0 : 200.0;
     return Scaffold(
       extendBodyBehindAppBar: true,
+      floatingActionButton: kDebugMode ? const DebugFab() : null,
       body: Stack(
         fit: StackFit.expand,
         children: [

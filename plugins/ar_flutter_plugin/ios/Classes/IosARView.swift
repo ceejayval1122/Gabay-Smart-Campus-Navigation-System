@@ -507,6 +507,34 @@ class IosARView: NSObject, FlutterPlatformView, ARSCNViewDelegate, UIGestureReco
                         promise(.success(false))
                     }
                     break
+                case 4: // coloredBox primitive
+                    let box = SCNBox(width: 1.0, height: 1.0, length: 1.0, chamferRadius: 0.0)
+                    let mat = SCNMaterial()
+                    mat.diffuse.contents = UIColor.green
+                    box.materials = [mat]
+                    let node = SCNNode(geometry: box)
+                    node.name = dict_node["name"] as? String
+                    if let transform = dict_node["transformation"] as? Array<NSNumber> {
+                        node.transform = deserializeMatrix4(transform)
+                    }
+
+                    if let anchorName = dict_anchor?["name"] as? String, let anchorType = dict_anchor?["type"] as? Int {
+                        switch anchorType{
+                            case 0: //PlaneAnchor
+                                if let anchor = self.anchorCollection[anchorName]{
+                                    self.sceneView.node(for: anchor)?.addChildNode(node)
+                                    promise(.success(true))
+                                } else {
+                                    promise(.success(false))
+                                }
+                            default:
+                                promise(.success(false))
+                        }
+                    } else {
+                        self.sceneView.scene.rootNode.addChildNode(node)
+                        promise(.success(true))
+                    }
+                    promise(.success(false))
                 default:
                     promise(.success(false))
             }
