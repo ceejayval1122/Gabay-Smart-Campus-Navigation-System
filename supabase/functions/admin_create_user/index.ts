@@ -7,15 +7,55 @@ serve(async (req) => {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
+    const authHeader = req.headers.get('Authorization') ?? '';
+    if (!authHeader.toLowerCase().startsWith('bearer ')) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    const projectUrl = Deno.env.get('EDGE_SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL');
+    const anonKey = Deno.env.get('EDGE_SUPABASE_ANON_KEY') ?? Deno.env.get('SUPABASE_ANON_KEY');
+    if (!anonKey) {
+      return new Response('Missing EDGE_SUPABASE_ANON_KEY', { status: 500 });
+    }
+    if (!projectUrl) {
+      return new Response('Missing EDGE_SUPABASE_URL', { status: 500 });
+    }
+
+    const authClient = createClient(projectUrl, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: userData, error: userErr } = await authClient.auth.getUser();
+    if (userErr || !userData?.user) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    let isAdminCaller = false;
+    try {
+      const { data: prof } = await authClient
+        .from('profiles')
+        .select('is_admin')
+        .eq('id', userData.user.id)
+        .maybeSingle();
+      isAdminCaller = (prof as any)?.is_admin === true;
+    } catch (_) {
+      isAdminCaller = (userData.user.user_metadata as any)?.is_admin === true;
+    }
+
+    if (!isAdminCaller) {
+      return new Response('Forbidden', { status: 403 });
+    }
+
     const { email, password, name, is_admin, course, department, created_by } = await req.json();
     if (!email || !password || !name) {
       return new Response('email, password, name required', { status: 400 });
     }
 
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SERVICE_ROLE_KEY')!
-    );
+    const serviceRoleKey = Deno.env.get('EDGE_SERVICE_ROLE_KEY') ?? Deno.env.get('SERVICE_ROLE_KEY');
+    if (!serviceRoleKey) {
+      return new Response('Missing EDGE_SERVICE_ROLE_KEY', { status: 500 });
+    }
+
+    const supabase = createClient(projectUrl, serviceRoleKey);
 
     // 1) Create auth user
     const { data: userRes, error: authErr } = await supabase.auth.admin.createUser({
@@ -29,7 +69,7 @@ serve(async (req) => {
     }
 
     // 2) Insert profile row
-    const { error: profErr } = await supabase.from('profiles').insert({
+    const profilePayload: Record<string, unknown> = {
       id: userRes.user.id,
       name,
       email,
@@ -39,8 +79,25 @@ serve(async (req) => {
       created_by: created_by ?? 'admin',
       active: true,
       created_at: new Date().toISOString(),
-    });
-    if (profErr) {
+    };
+
+    const missingCol = (message: string): string | null => {
+      const m = /Could not find the '([^']+)' column/.exec(message);
+      return m?.[1] ?? null;
+    };
+
+    let attempt = { ...profilePayload };
+    for (let i = 0; i < 8; i++) {
+      const { error: profErr } = await supabase.from('profiles').insert(attempt);
+      if (!profErr) break;
+
+      const msg = (profErr as any)?.message?.toString?.() ?? JSON.stringify(profErr);
+      const code = (profErr as any)?.code?.toString?.();
+      const col = missingCol(msg);
+      if (code === 'PGRST204' && col && Object.prototype.hasOwnProperty.call(attempt, col)) {
+        delete (attempt as any)[col];
+        continue;
+      }
       return new Response(JSON.stringify(profErr), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
 

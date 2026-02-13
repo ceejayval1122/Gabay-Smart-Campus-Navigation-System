@@ -6,12 +6,34 @@ class AuthRepository {
 
   final SupabaseClient _client = Supabase.instance.client;
 
+  String _formatAuthError(Object e) {
+    if (e is AuthException) {
+      if (e.message.contains('invalid email')) {
+        return 'Invalid email address';
+      } else if (e.message.contains('password should be at least')) {
+        return 'Password should be at least 8 characters long';
+      } else {
+        return e.message;
+      }
+    } else {
+      return e.toString();
+    }
+  }
+
   Future<AuthResponse> signUp({required String email, required String password}) async {
-    return await _client.auth.signUp(email: email, password: password);
+    try {
+      return await _client.auth.signUp(email: email, password: password);
+    } catch (e) {
+      throw Exception(_formatAuthError(e));
+    }
   }
 
   Future<AuthResponse> signIn({required String email, required String password}) async {
-    return await _client.auth.signInWithPassword(email: email, password: password);
+    try {
+      return await _client.auth.signInWithPassword(email: email, password: password);
+    } catch (e) {
+      throw Exception(_formatAuthError(e));
+    }
   }
 
   Future<void> signOut() async {

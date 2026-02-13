@@ -7,6 +7,40 @@ serve(async (req) => {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
+    const authHeader = req.headers.get('Authorization') ?? '';
+    if (!authHeader.toLowerCase().startsWith('bearer ')) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
+    if (!anonKey) {
+      return new Response('Missing SUPABASE_ANON_KEY', { status: 500 });
+    }
+
+    const authClient = createClient(Deno.env.get('SUPABASE_URL')!, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: userData, error: userErr } = await authClient.auth.getUser();
+    if (userErr || !userData?.user) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    let isAdminCaller = false;
+    try {
+      const { data: prof } = await authClient
+        .from('profiles')
+        .select('is_admin')
+        .eq('id', userData.user.id)
+        .maybeSingle();
+      isAdminCaller = (prof as any)?.is_admin === true;
+    } catch (_) {
+      isAdminCaller = (userData.user.user_metadata as any)?.is_admin === true;
+    }
+
+    if (!isAdminCaller) {
+      return new Response('Forbidden', { status: 403 });
+    }
+
     const { email, redirectTo } = await req.json();
     if (!email) return new Response('email required', { status: 400 });
 

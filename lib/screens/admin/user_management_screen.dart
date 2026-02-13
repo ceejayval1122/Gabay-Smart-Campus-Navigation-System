@@ -4,6 +4,7 @@ import 'package:Gabay/models/user.dart';
 import 'package:Gabay/repositories/profiles_repository.dart';
 import 'package:Gabay/repositories/admin_repository.dart';
 import '../../widgets/glass_container.dart';
+import '../../widgets/debug_fab.dart';
 
 class UserManagementScreen extends StatelessWidget {
   const UserManagementScreen({super.key});
@@ -13,6 +14,7 @@ class UserManagementScreen extends StatelessWidget {
     final theme = Theme.of(context);
     return Scaffold(
       extendBodyBehindAppBar: true,
+      floatingActionButton: kDebugMode ? const DebugFab() : null,
       appBar: AppBar(
         title: const Text('User Management'),
         backgroundColor: Colors.transparent,

@@ -60,6 +60,11 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
+  String _friendlyError(Object e) {
+    final s = e.toString();
+    return s.startsWith('Exception: ') ? s.substring('Exception: '.length) : s;
+  }
+
   Future<void> _showTopSuccessBanner(String message) async {
     final messenger = ScaffoldMessenger.of(context);
     messenger.clearMaterialBanners();
@@ -92,6 +97,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _courseController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
 
   @override
   void dispose() {
@@ -99,6 +105,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     _courseController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _confirmPasswordController.dispose();
     super.dispose();
   }
 
@@ -107,7 +114,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final course = _courseController.text.trim();
     final email = _emailController.text.trim();
     final pass = _passwordController.text;
-    return name.isNotEmpty && course.isNotEmpty && email.isNotEmpty && pass.isNotEmpty;
+    final confirm = _confirmPasswordController.text;
+    return name.isNotEmpty && course.isNotEmpty && email.isNotEmpty && pass.isNotEmpty &&
+        confirm.isNotEmpty && pass == confirm;
+  }
+
+  bool get _passwordsMatch {
+    final pass = _passwordController.text;
+    final confirm = _confirmPasswordController.text;
+    if (confirm.isEmpty) return true;
+    return pass == confirm;
   }
 
   InputDecoration _roundedInputDecoration({required String hint, required Widget icon}) {
@@ -231,7 +247,27 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                 icon: SvgPicture.asset('assets/icon/password.svg', width: 22, height: 22, color: Colors.white),
                               ),
                             ),
-                            const SizedBox(height: 40),
+                            const SizedBox(height: 30),
+                            TextField(
+                              style: const TextStyle(color: Colors.white),
+                              cursorColor: Colors.white,
+                              controller: _confirmPasswordController,
+                              obscureText: true,
+                              onChanged: (_) => setState(() {}),
+                              decoration: _roundedInputDecoration(
+                                hint: 'Confirm Password',
+                                icon: SvgPicture.asset('assets/icon/password.svg', width: 22, height: 22, color: Colors.white),
+                              ),
+                            ),
+                            if (!_passwordsMatch)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 12, left: 8),
+                                child: Text(
+                                  'Passwords do not match',
+                                  style: TextStyle(color: Color(0xFFFFB4AB)),
+                                ),
+                              ),
+                            const SizedBox(height: 28),
                             SizedBox(
                               height: 56,
                               child: ElevatedButton(
@@ -242,6 +278,19 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                         final email = _emailController.text.trim();
                                         final pass = _passwordController.text;
                                         try {
+                                          if (!_passwordsMatch) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(content: Text('Passwords do not match.')),
+                                            );
+                                            return;
+                                          }
+                                          if (!Env.isConfigured) {
+                                            if (!mounted) return;
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(content: Text('Signup is unavailable: Supabase is not configured.')),
+                                            );
+                                            return;
+                                          }
                                           // Prevent registering the fixed admin account from the app
                                           if (email.toLowerCase() == 'admin@seait.edu') {
                                             final messenger = ScaffoldMessenger.of(context);
@@ -264,8 +313,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                             return;
                                           }
                                           final res = await AuthRepository.instance.signUp(email: email, password: pass);
+                                          final signedInNow = res.session != null || Supabase.instance.client.auth.currentUser != null;
+
                                           // If immediately authenticated (email confirmation disabled), upsert profile.
-                                          if (Supabase.instance.client.auth.currentUser != null) {
+                                          if (signedInNow && Supabase.instance.client.auth.currentUser != null) {
                                             await ProfilesRepository.instance.upsertMyProfile(
                                               name: name.isNotEmpty ? name : 'User',
                                               email: email,
@@ -273,11 +324,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                             );
                                           }
                                           if (!mounted) return;
-                                          Navigator.of(context).pop('registered'); // Immediately back to Login; Login will show banner
+                                          if (!signedInNow) {
+                                            await _showTopSuccessBanner('Account created. Please check your email to confirm, then sign in.');
+                                          }
+                                          Navigator.of(context).pop('registered'); // Back to Login; Login will show banner
                                         } catch (e) {
                                           if (!mounted) return;
                                           ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(content: Text('Sign up failed: $e')),
+                                            SnackBar(content: Text('Sign up failed: ${_friendlyError(e)}')),
                                           );
                                         }
                                       }
@@ -525,6 +579,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
 
+  String _friendlyError(Object e) {
+    final s = e.toString();
+    return s.startsWith('Exception: ') ? s.substring('Exception: '.length) : s;
+  }
+
   @override
   void dispose() {
     _emailController.dispose();
@@ -670,6 +729,13 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                         final email = _emailController.text.trim();
                                         final pass = _passwordController.text.trim();
                                         try {
+                                          if (!Env.isConfigured) {
+                                            if (!mounted) return;
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(content: Text('Login is unavailable: Supabase is not configured.')),
+                                            );
+                                            return;
+                                          }
                                           await AuthRepository.instance.signIn(email: email, password: pass);
                                           await ProfilesRepository.instance.updateLastSignInNow();
                                           final profile = await ProfilesRepository.instance.getMyProfile();
@@ -696,7 +762,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                         } catch (e) {
                                           if (!mounted) return;
                                           ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(content: Text('Login failed: $e')),
+                                            SnackBar(content: Text('Login failed: ${_friendlyError(e)}')),
                                           );
                                         }
                                       }
