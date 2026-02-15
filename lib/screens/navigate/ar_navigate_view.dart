@@ -63,6 +63,15 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
   double? _refLat;
   double? _refLon;
 
+  // Fixed building-to-world mapping established once at origin
+  vm.Vector3? _worldOrigin;
+  vm.Vector3? _buildingOrigin;
+  double? _worldYaw;
+
+  // GPS smoothing
+  vm.Vector3? _smoothedGps;
+  static const double _gpsSmoothAlpha = 0.3;
+
   // When true, render a straight line to the destination instead of a waypoint/A* path.
   // This is better for indoor environments where GPS + no floorplan can make curved paths misleading.
   final bool _useDirectGuidance = true;
@@ -126,6 +135,43 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
     return vm.Vector3(dx, heightMeters, dz);
   }
 
+  /// Maps building coordinates to AR world coordinates using the fixed origin mapping.
+  vm.Vector3 _buildingToWorld(vm.Vector3 buildingPos) {
+    if (_worldOrigin == null || _buildingOrigin == null || _worldYaw == null) {
+      return buildingPos;
+    }
+    final delta = buildingPos - _buildingOrigin!;
+    final rot = vm.Matrix3.rotationY(_worldYaw!);
+    final rotated = rot.transformed(vm.Vector3(delta.x, 0, delta.z));
+    final groundY = _worldOrigin!.y - 1.2;
+    return vm.Vector3(
+      _worldOrigin!.x + rotated.x,
+      groundY + delta.y,
+      _worldOrigin!.z + rotated.z,
+    );
+  }
+
+  /// Places or replaces the destination marker at the given AR world position.
+  Future<void> _placeDestinationMarker(vm.Vector3 worldPos) async {
+    if (_disposed || objectManager == null) return;
+    if (_destNode != null) {
+      try { await objectManager?.removeNode(_destNode!); } catch (_) {}
+      _destNode = null;
+    }
+    final marker = ARNode(
+      type: NodeType.coloredBox,
+      uri: 'coloredBox',
+      scale: vm.Vector3(0.25, 0.25, 0.25),
+      position: worldPos,
+    );
+    try {
+      await objectManager?.addNode(marker);
+      _destNode = marker;
+    } catch (e, st) {
+      logger.error('Failed to add destination marker', tag: 'AR', error: e, stackTrace: st);
+    }
+  }
+
   Future<void> _loadRoomCoordinates() async {
     await RoomCoordinatesService().loadCoordinates();
   }
@@ -168,120 +214,18 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
 
     _ensureReferenceLatLon(lat: pos.latitude, lon: pos.longitude);
     final gpsPos = _latLonToLocalMeters(lat: pos.latitude, lon: pos.longitude, heightMeters: 0);
-    if (_lastGpsPosition != null && (gpsPos - _lastGpsPosition!).length < 0.5) return; // ignore tiny moves
-    _lastGpsPosition = gpsPos;
-    logger.info('GPS position updated', tag: 'AR', error: {'lat': pos.latitude, 'lon': pos.longitude});
-    _recomputePathFromGps(gpsPos);
-  }
 
-  Future<void> _recomputePathFromGps(vm.Vector3 gpsPos) async {
-    // Only recompute from GPS when the destination comes from saved room lat/lon.
-    // Waypoint-based routing uses a separate coordinate system.
-    final roomCoordsDeg = RoomCoordinatesService().getCoordinates(widget.destinationCode);
-    if (roomCoordsDeg == null) return;
-
-    final floor = RoomCoordinatesService().getFloor(widget.destinationCode);
-    const floorHeightMeters = 3.5;
-    final heightMeters = (roomCoordsDeg.y.abs() < 0.1 && floor != null)
-        ? (floor - 1) * floorHeightMeters
-        : roomCoordsDeg.y;
-
-    final goal = _latLonToLocalMeters(
-      lat: roomCoordsDeg.z,
-      lon: roomCoordsDeg.x,
-      heightMeters: heightMeters,
-    );
-
-    await _updatePokemonGoScene(currentPos: gpsPos, targetPos: goal);
-  }
-
-  Future<void> _updatePokemonGoScene({required vm.Vector3 currentPos, required vm.Vector3 targetPos}) async {
-    if (_disposed) return;
-    if (!originSet) return;
-    if (sessionManager == null || objectManager == null) return;
-
-    for (final n in _breadcrumbs) {
-      try {
-        await objectManager?.removeNode(n);
-      } catch (_) {}
-    }
-    _breadcrumbs.clear();
-
-    if (_userMarker != null) {
-      try {
-        await objectManager?.removeNode(_userMarker!);
-      } catch (_) {}
-      _userMarker = null;
-    }
-
-    vm.Matrix4? camPose;
-    try {
-      camPose = await sessionManager?.getCameraPose();
-    } catch (_) {}
-    if (camPose == null) return;
-
-    final camPos = camPose.getTranslation();
-
-    vm.Vector3 forward = vm.Vector3(0, 0, -1);
-    final zCol = camPose.getColumn(2);
-    forward = vm.Vector3(-zCol.x, -zCol.y, -zCol.z);
-    final forwardFlat = vm.Vector3(forward.x, 0, forward.z);
-    if (forwardFlat.length2 > 0.0001) {
-      forward = forwardFlat.normalized();
+    // Smooth GPS to reduce jitter
+    if (_smoothedGps == null) {
+      _smoothedGps = gpsPos;
     } else {
-      forward = vm.Vector3(0, 0, -1);
-    }
-    final yaw = math.atan2(forward.x, -forward.z);
-    final rotY = vm.Matrix3.rotationY(yaw);
-
-    final vm.Vector3 camBuilding = currentPos;
-    final vm.Vector3 camWorld = vm.Vector3(camPos.x, camPos.y, camPos.z);
-    vm.Vector3 tf(vm.Vector3 p) {
-      final delta = p - camBuilding;
-      final r = rotY.transformed(delta);
-      return vm.Vector3(camWorld.x + r.x, camWorld.y + r.y, camWorld.z + r.z);
+      _smoothedGps = _smoothedGps! * (1 - _gpsSmoothAlpha) + gpsPos * _gpsSmoothAlpha;
     }
 
-    for (final marker in _roomMarkers) {
-      try {
-        await objectManager?.removeNode(marker);
-      } catch (_) {}
-    }
-    _roomMarkers.clear();
-
-    if (_destNode != null) {
-      try {
-        await objectManager?.removeNode(_destNode!);
-      } catch (_) {}
-      _destNode = null;
-    }
-
-    final targetWorld = tf(targetPos);
-    final targetMarker = ARNode(
-      type: NodeType.coloredBox,
-      uri: 'coloredBox',
-      scale: vm.Vector3(0.25, 0.25, 0.25),
-      position: targetWorld, // Sit on top of the beacon for a connected look
-    );
-    try {
-      await objectManager?.addNode(targetMarker);
-      _destNode = targetMarker;
-      if (_targetWorld == null || (_targetWorld! - targetWorld).length > 0.1) {
-        _arrivalNotified = false;
-      }
-      _targetWorld = targetWorld;
-      _destWorld = targetWorld;
-    } catch (e, st) {
-      logger.error('Failed to add destination marker', tag: 'AR', error: e, stackTrace: st);
-    }
-
-    // Do not render other room markers; keep route focused on the selected destination.
-
-    await _updateRouteLineFromPose(
-      camPose: camPose,
-      camWorld: camWorld,
-      targetWorld: targetWorld,
-    );
+    if (_lastGpsPosition != null && (_smoothedGps! - _lastGpsPosition!).length < 0.5) return;
+    _lastGpsPosition = _smoothedGps;
+    logger.info('GPS position updated (smoothed)', tag: 'AR', error: {'lat': pos.latitude, 'lon': pos.longitude});
+    // Destination stays fixed in AR world; route line is updated by _refreshRouteFromCamera timer.
   }
 
   Future<void> _updateRouteLineFromPose({
@@ -528,12 +472,44 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
             ),
           );
         }
-        return;
+        // Don't return immediately - wait a bit and retry
+        await Future.delayed(const Duration(seconds: 2));
+        if (_disposed) return;
+        
+        // Retry getting GPS location
+        final retryGps = locationManager?.currentLocation;
+        if (retryGps == null) {
+          logger.warning('GPS still not available after retry, falling back to waypoints', tag: 'AR');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('GPS unavailable. Using default navigation.'),
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+          // Fall back to waypoint-based navigation
+          startPos = kWaypoints[getStartWaypointForCurrentArea()]?.pos ?? vm.Vector3.zero();
+          final destId = kRoomToWaypoint[widget.destinationCode];
+          if (destId == null) return;
+          goal = kWaypoints[destId]?.pos ?? destWorld;
+          polyline = _useDirectGuidance ? <vm.Vector3>[startPos, goal] : () {
+            final startId = findNearestWaypointId(startPos, kWaypoints);
+            final path = findPathAStar(waypoints: kWaypoints, startId: startId, goalId: destId);
+            return path.isEmpty ? <vm.Vector3>[startPos, goal] : waypointsToPolyline(path);
+          }();
+        } else {
+          _ensureReferenceLatLon(lat: retryGps.latitude, lon: retryGps.longitude);
+          startPos = _latLonToLocalMeters(lat: retryGps.latitude, lon: retryGps.longitude, heightMeters: 0);
+          goal = _latLonToLocalMeters(lat: roomCoordsDeg.z, lon: roomCoordsDeg.x, heightMeters: roomCoordsDeg.y);
+          polyline = <vm.Vector3>[startPos, goal];
+        }
+      } else {
+        _ensureReferenceLatLon(lat: gps.latitude, lon: gps.longitude);
+        startPos = _latLonToLocalMeters(lat: gps.latitude, lon: gps.longitude, heightMeters: 0);
+        goal = _latLonToLocalMeters(lat: roomCoordsDeg.z, lon: roomCoordsDeg.x, heightMeters: roomCoordsDeg.y);
+        polyline = <vm.Vector3>[startPos, goal];
       }
-      _ensureReferenceLatLon(lat: gps.latitude, lon: gps.longitude);
-      startPos = _latLonToLocalMeters(lat: gps.latitude, lon: gps.longitude, heightMeters: 0);
-      goal = _latLonToLocalMeters(lat: roomCoordsDeg.z, lon: roomCoordsDeg.x, heightMeters: roomCoordsDeg.y);
-      polyline = <vm.Vector3>[startPos, goal];
     } else {
       // Waypoint-based routing (predefined map coordinates)
       startPos = kWaypoints[getStartWaypointForCurrentArea()]?.pos ?? vm.Vector3.zero();
@@ -550,8 +526,33 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       }();
     }
 
-    if (roomCoordsDeg != null) {
-      await _updatePokemonGoScene(currentPos: startPos, targetPos: goal);
+    // Establish fixed building-to-world mapping (done once at origin)
+    vm.Vector3 camWorldPos;
+    if (pose != null) {
+      final cp = pose.getTranslation();
+      camWorldPos = vm.Vector3(cp.x, cp.y, cp.z);
+    } else {
+      camWorldPos = pos;
+    }
+    _worldOrigin = camWorldPos;
+    _buildingOrigin = startPos;
+    _worldYaw = overrideYaw ?? math.atan2(forward.x, -forward.z);
+
+    // Compute destination in AR world space (fixed — won't drift with GPS)
+    _targetWorld = _buildingToWorld(goal);
+    _destWorld = _targetWorld;
+    _arrivalNotified = false;
+
+    // Place destination marker at the fixed world position
+    await _placeDestinationMarker(_targetWorld!);
+
+    // Draw initial route line from camera to destination
+    if (pose != null) {
+      await _updateRouteLineFromPose(
+        camPose: pose,
+        camWorld: camWorldPos,
+        targetWorld: _targetWorld!,
+      );
     }
 
     if (mounted && !_disposed) setState(() {});
