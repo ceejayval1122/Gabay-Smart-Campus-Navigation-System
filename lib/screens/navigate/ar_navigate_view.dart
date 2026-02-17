@@ -14,7 +14,9 @@ import 'package:ar_flutter_plugin/models/ar_node.dart';
 import 'package:ar_flutter_plugin/widgets/ar_view.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 
 import '../../navigation/a_star.dart';
@@ -44,6 +46,8 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
   ARNode? _userMarker;
   ARNode? _directionArrow;
   ARNode? _destNode;
+  ARNode? _routeLineNode;
+  ARNode? _routeBeaconNode;
   
   final List<ARNode> _roomMarkers = [];
   final List<ARNode> _breadcrumbs = [];
@@ -75,6 +79,42 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
   // When true, render a straight line to the destination instead of a waypoint/A* path.
   // This is better for indoor environments where GPS + no floorplan can make curved paths misleading.
   final bool _useDirectGuidance = true;
+  bool _showDebugOverlay = false;
+  bool _showDebugDetails = false;
+  String _lastDebugError = '';
+
+  static const double _minRenderableSegmentMeters = 0.30;
+  static const double _maxRenderableSegmentMeters = 12.0;
+  static const double _beaconMinHeightMeters = 3.0;
+  static const double _lineStartOffsetMeters = 0.8;
+  static const double _lineLiftMeters = 0.02;
+
+  Future<Position?> _awaitGpsFix({
+    Duration timeout = const Duration(seconds: 12),
+    double maxAccuracyMeters = 15.0,
+    Duration maxAge = const Duration(seconds: 4),
+  }) async {
+    final end = DateTime.now().add(timeout);
+    while (!_disposed && DateTime.now().isBefore(end)) {
+      final p = locationManager?.currentLocation;
+      if (p != null) {
+        final ts = p.timestamp;
+        final ageOk = ts != null && DateTime.now().difference(ts).abs() <= maxAge;
+        final accOk = p.accuracy <= maxAccuracyMeters;
+        if (ageOk && accOk) return p;
+      }
+      await Future.delayed(const Duration(milliseconds: 400));
+    }
+
+    try {
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 6),
+      );
+    } catch (_) {
+      return locationManager?.currentLocation;
+    }
+  }
 
   // Resolve real destination for the selected room
   vm.Vector3? get _destinationWorld {
@@ -162,11 +202,15 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       type: NodeType.coloredBox,
       uri: 'coloredBox',
       scale: vm.Vector3(0.25, 0.25, 0.25),
-      position: worldPos,
+      position: worldPos + vm.Vector3(0, 0.4, 0),
     );
     try {
-      await objectManager?.addNode(marker);
-      _destNode = marker;
+      final added = await objectManager?.addNode(marker);
+      if (added == true) {
+        _destNode = marker;
+      } else {
+        _destNode = null;
+      }
     } catch (e, st) {
       logger.error('Failed to add destination marker', tag: 'AR', error: e, stackTrace: st);
     }
@@ -235,62 +279,104 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
   }) async {
     if (_disposed || objectManager == null) return;
 
-    for (final n in _breadcrumbs) {
-      try {
-        await objectManager?.removeNode(n);
-      } catch (_) {}
-    }
-    _breadcrumbs.clear();
-
     // Use camera-relative coordinates for consistent centering
     final camPos = camPose.getTranslation();
     
     // Ground-align route visuals relative to camera height.
-    final groundY = camPos.y - 1.2;
+    final groundY = (_worldOrigin?.y ?? camPos.y) - 1.2;
     
     // Start line from camera position projected to ground for perfect centering
     final startGround = vm.Vector3(camPos.x, groundY, camPos.z);
     final endGround = vm.Vector3(targetWorld.x, groundY, targetWorld.z);
     final seg = endGround - startGround;
     final segLen = seg.length;
+    // Update debug state
+    if (mounted) setState(() {
+      _lastDebugError = '';
+    });
 
-    // Straight route line from camera-center to destination (ground-aligned).
-    if (segLen > 0.3) {
-      final yawSeg = math.atan2(seg.x, -seg.z);
+    final renderLen = segLen.clamp(0.0, _maxRenderableSegmentMeters).toDouble();
+    final dir = (segLen <= 0.0001) ? vm.Vector3.zero() : (seg / segLen);
+    final renderEndGround = (segLen <= 0.0001) ? startGround : startGround + dir * renderLen;
+    final startLineGround = (renderLen > _lineStartOffsetMeters) ? (startGround + dir * _lineStartOffsetMeters) : startGround;
+    final renderSeg = renderEndGround - startLineGround;
+    final renderSegLen = renderSeg.length;
+
+    // Straight route line from camera-center toward destination (ground-aligned).
+    if (renderSegLen > _minRenderableSegmentMeters) {
+      final yawSeg = math.atan2(renderSeg.x, -renderSeg.z);
       final pathCenter = vm.Vector3(
-        startGround.x + seg.x / 2,
-        groundY,
-        startGround.z + seg.z / 2,
-      );
-      final pathLine = ARNode(
-        type: NodeType.coloredBox,
-        uri: 'coloredBox',
-        scale: vm.Vector3(0.06, 0.01, segLen),
-        position: pathCenter,
-        eulerAngles: vm.Vector3(0, yawSeg, 0),
+        startLineGround.x + renderSeg.x / 2,
+        groundY + _lineLiftMeters,
+        startLineGround.z + renderSeg.z / 2,
       );
       try {
-        await objectManager?.addNode(pathLine);
-        _breadcrumbs.add(pathLine);
+        if (_routeLineNode == null) {
+          final pathLine = ARNode(
+            type: NodeType.coloredBox,
+            uri: 'coloredBox',
+            scale: vm.Vector3(0.04, 0.008, renderSegLen),
+            position: pathCenter,
+            eulerAngles: vm.Vector3(0, yawSeg, 0),
+          );
+          final added = await objectManager?.addNode(pathLine);
+          if (added == true) {
+            _routeLineNode = pathLine;
+          } else {
+            _routeLineNode = null;
+          }
+        } else {
+          final node = _routeLineNode!;
+          node.transform = vm.Matrix4.compose(
+            pathCenter,
+            vm.Quaternion.euler(0, yawSeg, 0),
+            vm.Vector3(0.04, 0.008, renderSegLen),
+          );
+        }
       } catch (e, st) {
         logger.error('Failed to add path line', tag: 'AR', error: e, stackTrace: st);
+        if (mounted) setState(() {
+          _lastDebugError = 'pathLine: ${e.runtimeType}';
+        });
+      }
+    } else {
+      if (_routeLineNode != null) {
+        try { await objectManager?.removeNode(_routeLineNode!); } catch (_) {}
+        _routeLineNode = null;
       }
     }
 
     // Destination beacon: vertical pillar from route end up toward the destination height.
-    final beaconHeightNum = (targetWorld.y - groundY).clamp(1.2, 12.0);
+    final beaconHeightNum = (targetWorld.y - groundY).clamp(_beaconMinHeightMeters, 12.0);
     final beaconHeight = beaconHeightNum.toDouble();
-    final beacon = ARNode(
-      type: NodeType.coloredBox,
-      uri: 'coloredBox',
-      scale: vm.Vector3(0.10, beaconHeight, 0.10),
-      position: endGround + vm.Vector3(0, beaconHeight / 2, 0),
-    );
     try {
-      await objectManager?.addNode(beacon);
-      _breadcrumbs.add(beacon);
+      final beaconPos = renderEndGround + vm.Vector3(0, beaconHeight / 2, 0);
+      if (_routeBeaconNode == null) {
+        final beacon = ARNode(
+          type: NodeType.coloredBox,
+          uri: 'coloredBox',
+          scale: vm.Vector3(0.25, beaconHeight, 0.25),
+          position: beaconPos,
+        );
+        final added = await objectManager?.addNode(beacon);
+        if (added == true) {
+          _routeBeaconNode = beacon;
+        } else {
+          _routeBeaconNode = null;
+        }
+      } else {
+        final node = _routeBeaconNode!;
+        node.transform = vm.Matrix4.compose(
+          beaconPos,
+          vm.Quaternion.identity(),
+          vm.Vector3(0.25, beaconHeight, 0.25),
+        );
+      }
     } catch (e, st) {
       logger.error('Failed to add destination beacon', tag: 'AR', error: e, stackTrace: st);
+      if (mounted) setState(() {
+        _lastDebugError = 'beacon: ${e.runtimeType}';
+      });
     }
 
     _updateDistance();
@@ -422,6 +508,14 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       try { await objectManager?.removeNode(n); } catch (_) {}
     }
     _breadcrumbs.clear();
+    if (_routeLineNode != null) {
+      try { await objectManager?.removeNode(_routeLineNode!); } catch (_) {}
+      _routeLineNode = null;
+    }
+    if (_routeBeaconNode != null) {
+      try { await objectManager?.removeNode(_routeBeaconNode!); } catch (_) {}
+      _routeBeaconNode = null;
+    }
     for (final marker in _roomMarkers) {
       try { await objectManager?.removeNode(marker); } catch (_) {}
     }
@@ -436,7 +530,7 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
     }
 
     origin = pos;
-    originSet = true;
+    originSet = false;
     _arrivalNotified = false;
 
     // Determine forward from provided cam pose or latest
@@ -455,59 +549,45 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
     }
 
     // If the destination comes from saved room lat/lon, use local-meter conversion and direct guidance.
+    final customCoordsDeg = kCustomDestinations[widget.destinationCode];
     final roomCoordsDeg = RoomCoordinatesService().getCoordinates(widget.destinationCode);
+    final latLonDestDeg = customCoordsDeg ?? roomCoordsDeg;
     vm.Vector3 startPos;
     vm.Vector3 goal;
     List<vm.Vector3> polyline;
 
-    if (roomCoordsDeg != null) {
-      final gps = locationManager?.currentLocation;
+    if (latLonDestDeg != null) {
+      final gps = await _awaitGpsFix();
       if (gps == null) {
-        logger.warning('Waiting for GPS fix to use saved room coordinates', tag: 'AR');
+        logger.warning('GPS not available for lat/lon destination', tag: 'AR', error: {
+          'destinationCode': widget.destinationCode,
+          'source': customCoordsDeg != null ? 'custom' : 'room_coords',
+        });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('GPS is loading, please wait a moment...'),
+              content: Text('GPS is loading, please try again in a moment.'),
               duration: Duration(seconds: 3),
             ),
           );
         }
-        // Don't return immediately - wait a bit and retry
-        await Future.delayed(const Duration(seconds: 2));
-        if (_disposed) return;
-        
-        // Retry getting GPS location
-        final retryGps = locationManager?.currentLocation;
-        if (retryGps == null) {
-          logger.warning('GPS still not available after retry, falling back to waypoints', tag: 'AR');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('GPS unavailable. Using default navigation.'),
-                duration: Duration(seconds: 2),
-              ),
-            );
-          }
-          // Fall back to waypoint-based navigation
-          startPos = kWaypoints[getStartWaypointForCurrentArea()]?.pos ?? vm.Vector3.zero();
-          final destId = kRoomToWaypoint[widget.destinationCode];
-          if (destId == null) return;
-          goal = kWaypoints[destId]?.pos ?? destWorld;
-          polyline = _useDirectGuidance ? <vm.Vector3>[startPos, goal] : () {
-            final startId = findNearestWaypointId(startPos, kWaypoints);
-            final path = findPathAStar(waypoints: kWaypoints, startId: startId, goalId: destId);
-            return path.isEmpty ? <vm.Vector3>[startPos, goal] : waypointsToPolyline(path);
-          }();
-        } else {
-          _ensureReferenceLatLon(lat: retryGps.latitude, lon: retryGps.longitude);
-          startPos = _latLonToLocalMeters(lat: retryGps.latitude, lon: retryGps.longitude, heightMeters: 0);
-          goal = _latLonToLocalMeters(lat: roomCoordsDeg.z, lon: roomCoordsDeg.x, heightMeters: roomCoordsDeg.y);
-          polyline = <vm.Vector3>[startPos, goal];
+
+        // Fall back to waypoint-based navigation only when available (predefined rooms).
+        startPos = kWaypoints[getStartWaypointForCurrentArea()]?.pos ?? vm.Vector3.zero();
+        final destId = kRoomToWaypoint[widget.destinationCode];
+        if (destId == null) {
+          return;
         }
+        goal = kWaypoints[destId]?.pos ?? destWorld;
+        polyline = _useDirectGuidance ? <vm.Vector3>[startPos, goal] : () {
+          final startId = findNearestWaypointId(startPos, kWaypoints);
+          final path = findPathAStar(waypoints: kWaypoints, startId: startId, goalId: destId);
+          return path.isEmpty ? <vm.Vector3>[startPos, goal] : waypointsToPolyline(path);
+        }();
       } else {
         _ensureReferenceLatLon(lat: gps.latitude, lon: gps.longitude);
         startPos = _latLonToLocalMeters(lat: gps.latitude, lon: gps.longitude, heightMeters: 0);
-        goal = _latLonToLocalMeters(lat: roomCoordsDeg.z, lon: roomCoordsDeg.x, heightMeters: roomCoordsDeg.y);
+        goal = _latLonToLocalMeters(lat: latLonDestDeg.z, lon: latLonDestDeg.x, heightMeters: latLonDestDeg.y);
         polyline = <vm.Vector3>[startPos, goal];
       }
     } else {
@@ -558,6 +638,7 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
     if (mounted && !_disposed) setState(() {});
     
     // Start continuous arrow updates
+    originSet = true;
     _startArrowUpdates();
   }
 
@@ -581,6 +662,9 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       if (camPose == null) return;
       final camPos = camPose.getTranslation();
       final camWorld = vm.Vector3(camPos.x, camPos.y, camPos.z);
+      if (_destNode == null) {
+        await _placeDestinationMarker(_targetWorld!);
+      }
       await _updateRouteLineFromPose(
         camPose: camPose,
         camWorld: camWorld,
@@ -588,6 +672,9 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       );
     } catch (e, st) {
       logger.error('Failed to refresh route line', tag: 'AR', error: e, stackTrace: st);
+      if (mounted) setState(() {
+        _lastDebugError = 'refresh: ${e.runtimeType}';
+      });
     }
   }
 
@@ -734,6 +821,15 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
     }
     _roomMarkers.clear();
 
+    if (_routeLineNode != null) {
+      try { objectManager?.removeNode(_routeLineNode!); } catch (_) {}
+      _routeLineNode = null;
+    }
+    if (_routeBeaconNode != null) {
+      try { objectManager?.removeNode(_routeBeaconNode!); } catch (_) {}
+      _routeBeaconNode = null;
+    }
+
     sessionManager = null;
     objectManager = null;
     anchorManager = null;
@@ -762,12 +858,121 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(originSet ? 'Tap floor to reset origin' : 'Tap floor to set origin'),
-                  if (originSet) 
-                    Text('${currentDistance.toStringAsFixed(1)} m to ${widget.destinationCode}') 
-                  else 
+                  if (originSet)
+                    FutureBuilder<vm.Matrix4?>(
+                      future: sessionManager?.getCameraPose(),
+                      builder: (_, snap) {
+                        if (!snap.hasData || _targetWorld == null) {
+                          return Text('${currentDistance.toStringAsFixed(1)} m to ${widget.destinationCode}');
+                        }
+                        final cam = snap.data!;
+                        final camPos = cam.getTranslation();
+                        final groundY = (_worldOrigin?.y ?? camPos.y) - 1.2;
+                        final startGround = vm.Vector3(camPos.x, groundY, camPos.z);
+                        final endGround = vm.Vector3(_targetWorld!.x, groundY, _targetWorld!.z);
+                        final seg = endGround - startGround;
+                        final segLen = seg.length;
+                        if (segLen < 0.3) {
+                          return Text('You have arrived at ${widget.destinationCode}!', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold));
+                        }
+                        return Text('${currentDistance.toStringAsFixed(1)} m to ${widget.destinationCode}');
+                      },
+                    )
+                  else
                     const SizedBox.shrink(),
                 ],
               ),
+            ),
+          ),
+          if (_showDebugOverlay)
+            Positioned(
+              top: 40,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                color: Colors.black87,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Status', style: TextStyle(color: Colors.cyan, fontSize: 12, fontWeight: FontWeight.bold)),
+                    Text('GPS: ${locationManager?.currentLocation != null ? '✅' : '⏳'}', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    Text('origin: ${originSet ? '✅' : '⏳'}', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    Text('marker: ${_destNode != null ? '✅' : '❌'}', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    Text('line: ${_routeLineNode != null ? '✅' : '❌'}', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    Text('beacon: ${_routeBeaconNode != null ? '✅' : '❌'}', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    Text('distance: ${currentDistance.toStringAsFixed(1)} m', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    if (_lastDebugError.isNotEmpty)
+                      Text('issue: $_lastDebugError', style: TextStyle(color: Colors.redAccent, fontSize: 11)),
+                    if (_showDebugDetails)
+                      FutureBuilder<vm.Matrix4?>(
+                        future: sessionManager?.getCameraPose(),
+                        builder: (_, snap) {
+                          if (!snap.hasData || _targetWorld == null) {
+                            return Text('AR: —', style: TextStyle(color: Colors.white, fontSize: 11));
+                          }
+                          final cam = snap.data!;
+                          final camPos = cam.getTranslation();
+                          final groundY = (_worldOrigin?.y ?? camPos.y) - 1.2;
+                          final startGround = vm.Vector3(camPos.x, groundY, camPos.z);
+                          final endGround = vm.Vector3(_targetWorld!.x, groundY, _targetWorld!.z);
+                          final seg = endGround - startGround;
+                          final segLen = seg.length;
+                          final arrived = segLen < _minRenderableSegmentMeters;
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('segLen: ${segLen.toStringAsFixed(2)} m${arrived ? ' (arrived)' : ''}', style: TextStyle(color: arrived ? Colors.greenAccent : Colors.white, fontSize: 11)),
+                              Text('groundY: ${groundY.toStringAsFixed(2)}', style: TextStyle(color: Colors.white, fontSize: 11)),
+                              Text('target: (${_targetWorld!.x.toStringAsFixed(1)}, ${_targetWorld!.y.toStringAsFixed(1)}, ${_targetWorld!.z.toStringAsFixed(1)})', style: TextStyle(color: Colors.white, fontSize: 11)),
+                            ],
+                          );
+                        },
+                      ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          onPressed: () => setState(() => _showDebugDetails = !_showDebugDetails),
+                          child: Text(_showDebugDetails ? 'Less' : 'Details', style: TextStyle(color: Colors.white, fontSize: 10)),
+                        ),
+                        TextButton(
+                          onPressed: () async {
+                            final p = locationManager?.currentLocation;
+                            final report = StringBuffer()
+                              ..writeln('dest=${widget.destinationCode}')
+                              ..writeln('originSet=$originSet')
+                              ..writeln('gps=${p != null}')
+                              ..writeln('lat=${p?.latitude} lon=${p?.longitude}')
+                              ..writeln('distance=${currentDistance.toStringAsFixed(2)}')
+                              ..writeln('marker=${_destNode != null} line=${_routeLineNode != null} beacon=${_routeBeaconNode != null}')
+                              ..writeln('target=${_targetWorld != null ? '${_targetWorld!.x.toStringAsFixed(2)},${_targetWorld!.y.toStringAsFixed(2)},${_targetWorld!.z.toStringAsFixed(2)}' : 'null'}')
+                              ..writeln('issue=${_lastDebugError.isNotEmpty ? _lastDebugError : 'none'}');
+                            await Clipboard.setData(ClipboardData(text: report.toString()));
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Status report copied.')),
+                            );
+                          },
+                          child: Text('Copy', style: TextStyle(color: Colors.white, fontSize: 10)),
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() => _showDebugOverlay = false),
+                          child: Text('Hide', style: TextStyle(color: Colors.white, fontSize: 10)),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          Positioned(
+            top: 40,
+            left: 8,
+            child: TextButton(
+              onPressed: () => setState(() => _showDebugOverlay = !_showDebugOverlay),
+              child: Text(_showDebugOverlay ? 'Hide Status' : 'Show Status', style: TextStyle(color: Colors.white)),
+              style: TextButton.styleFrom(backgroundColor: Colors.black54),
             ),
           ),
         ],

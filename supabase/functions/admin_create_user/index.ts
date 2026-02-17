@@ -9,24 +9,26 @@ serve(async (req) => {
 
     const authHeader = req.headers.get('Authorization') ?? '';
     if (!authHeader.toLowerCase().startsWith('bearer ')) {
-      return new Response('Unauthorized', { status: 401 });
+      return new Response('Unauthorized: missing or invalid Authorization header', { status: 401 });
     }
 
-    const projectUrl = Deno.env.get('EDGE_SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL');
-    const anonKey = Deno.env.get('EDGE_SUPABASE_ANON_KEY') ?? Deno.env.get('SUPABASE_ANON_KEY');
+    const projectUrl = Deno.env.get('SUPABASE_URL') ?? Deno.env.get('EDGE_SUPABASE_URL');
+    const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? Deno.env.get('EDGE_SUPABASE_ANON_KEY');
     if (!anonKey) {
-      return new Response('Missing EDGE_SUPABASE_ANON_KEY', { status: 500 });
+      return new Response('Missing SUPABASE_ANON_KEY', { status: 500 });
     }
     if (!projectUrl) {
-      return new Response('Missing EDGE_SUPABASE_URL', { status: 500 });
+      return new Response('Missing SUPABASE_URL', { status: 500 });
     }
 
+    // Validate the JWT manually using the anon key (no verify_jwt)
     const authClient = createClient(projectUrl, anonKey, {
       global: { headers: { Authorization: authHeader } },
     });
     const { data: userData, error: userErr } = await authClient.auth.getUser();
     if (userErr || !userData?.user) {
-      return new Response('Unauthorized', { status: 401 });
+      console.error('getUser error:', userErr);
+      return new Response(`Unauthorized: ${userErr?.message ?? 'invalid JWT'}`, { status: 401 });
     }
 
     let isAdminCaller = false;
@@ -50,9 +52,9 @@ serve(async (req) => {
       return new Response('email, password, name required', { status: 400 });
     }
 
-    const serviceRoleKey = Deno.env.get('EDGE_SERVICE_ROLE_KEY') ?? Deno.env.get('SERVICE_ROLE_KEY');
+    const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('EDGE_SERVICE_ROLE_KEY');
     if (!serviceRoleKey) {
-      return new Response('Missing EDGE_SERVICE_ROLE_KEY', { status: 500 });
+      return new Response('Missing SERVICE_ROLE_KEY', { status: 500 });
     }
 
     const supabase = createClient(projectUrl, serviceRoleKey);

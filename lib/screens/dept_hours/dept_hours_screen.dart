@@ -499,6 +499,15 @@ class _DeptHoursScreenState extends State<DeptHoursScreen> {
                 StreamBuilder<List<DepartmentHours>>(
                   stream: DepartmentHoursService.instance.list(),
                   builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      return Center(
+                        child: Text(
+                          'Failed to load departments: ${snapshot.error}',
+                          style: const TextStyle(color: Colors.white70),
+                          textAlign: TextAlign.center,
+                        ),
+                      );
+                    }
                     _allDepts = snapshot.data ?? const <DepartmentHours>[];
                     final list = _filtered;
                     if (list.isEmpty) {

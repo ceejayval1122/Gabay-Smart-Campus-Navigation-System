@@ -54,10 +54,28 @@ class Room {
       // Handle both camelCase and snake_case from different sources
       final id = json['id'] as String? ?? const Uuid().v4();
       final qrCode = (json['qr_code'] ?? json['qrCode']) as String? ?? '';
-      final code = (json['code'] ?? '') as String;
+
+      final rawCode = json['code'];
+      String code;
+      if (rawCode is String) {
+        code = rawCode;
+      } else {
+        code = '';
+      }
+      if (code.trim().isEmpty) {
+        final m = RegExp(r'^ROOM_(.+?)_').firstMatch(qrCode);
+        if (m != null) {
+          code = m.group(1) ?? '';
+        }
+      }
+      if (code.trim().isEmpty) {
+        code = 'ROOM_${id.substring(0, 6).toUpperCase()}';
+      }
+
       final name = (json['name'] ?? 'Unnamed Room') as String;
       final building = json['building'] as String?;
-      final capacity = json['capacity'] as int?;
+      final capAny = json['capacity'];
+      final capacity = capAny is num ? capAny.toInt() : null;
       final deptTag = (json['dept_tag'] ?? json['deptTag']) as String?;
       final qrImagePath = json['qrImagePath'] as String?;
       

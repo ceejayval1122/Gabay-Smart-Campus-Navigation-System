@@ -5,6 +5,60 @@ import '../../models/booking.dart';
 class BookingManagementScreen extends StatelessWidget {
   const BookingManagementScreen({super.key});
 
+  Future<void> _showConfirmation(
+    BuildContext context, {
+    required String title,
+    required String content,
+    required String confirmText,
+    required VoidCallback onConfirm,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(confirmText),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      onConfirm();
+    }
+  }
+
+  void _handleAction(
+    BuildContext context, {
+    required Future<void> Function() action,
+    required String successMessage,
+    required String errorMessage,
+  }) async {
+    try {
+      await action();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(successMessage), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$errorMessage: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -48,6 +102,7 @@ class BookingManagementScreen extends StatelessWidget {
                         'pending': Colors.amber,
                         'approved': Colors.lightGreenAccent,
                         'declined': Colors.redAccent,
+                        'rejected': Colors.redAccent,
                       }[b.status] ?? Colors.white70;
                       return Container(
                         padding: const EdgeInsets.all(12),
@@ -90,20 +145,57 @@ class BookingManagementScreen extends StatelessWidget {
                               crossAxisAlignment: WrapCrossAlignment.center,
                               children: [
                                 TextButton.icon(
-                                  onPressed: b.status == 'approved' ? null : () => BookingService.instance.updateStatus(b.id, 'approved'),
+                                  onPressed: b.status == 'approved'
+                                      ? null
+                                      : () => _showConfirmation(
+                                            context,
+                                            title: 'Approve Booking',
+                                            content: 'Approve booking for ${b.facility} on ${_fmtDate(b.date)}?',
+                                            confirmText: 'Approve',
+                                            onConfirm: () => _handleAction(
+                                              context,
+                                              action: () => BookingService.instance.updateStatus(b.id, 'approved'),
+                                              successMessage: 'Booking approved',
+                                              errorMessage: 'Failed to approve booking',
+                                            ),
+                                          ),
                                   icon: const Icon(Icons.check_circle, color: Colors.white),
                                   label: const Text('Approve', style: TextStyle(color: Colors.white)),
                                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                                 ),
                                 TextButton.icon(
-                                  onPressed: b.status == 'declined' ? null : () => BookingService.instance.updateStatus(b.id, 'declined'),
+                                  onPressed: (b.status == 'declined' || b.status == 'rejected')
+                                      ? null
+                                      : () => _showConfirmation(
+                                            context,
+                                            title: 'Decline Booking',
+                                            content: 'Decline booking for ${b.facility} on ${_fmtDate(b.date)}?',
+                                            confirmText: 'Decline',
+                                            onConfirm: () => _handleAction(
+                                              context,
+                                              action: () => BookingService.instance.updateStatus(b.id, 'rejected'),
+                                              successMessage: 'Booking declined',
+                                              errorMessage: 'Failed to decline booking',
+                                            ),
+                                          ),
                                   icon: const Icon(Icons.cancel, color: Colors.white),
                                   label: const Text('Decline', style: TextStyle(color: Colors.white)),
                                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                                 ),
                                 IconButton(
                                   tooltip: 'Delete',
-                                  onPressed: () => BookingService.instance.delete(b.id),
+                                  onPressed: () => _showConfirmation(
+                                    context,
+                                    title: 'Delete Booking',
+                                    content: 'Permanently delete this booking?',
+                                    confirmText: 'Delete',
+                                    onConfirm: () => _handleAction(
+                                      context,
+                                      action: () => BookingService.instance.delete(b.id),
+                                      successMessage: 'Booking deleted',
+                                      errorMessage: 'Failed to delete booking',
+                                    ),
+                                  ),
                                   icon: const Icon(Icons.delete_outline, color: Colors.white70),
                                 ),
                               ],

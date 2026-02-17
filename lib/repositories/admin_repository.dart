@@ -19,6 +19,16 @@ class AdminRepository {
 
   SupabaseClient get _client => Supabase.instance.client;
 
+  String _stringifyDetails(dynamic details) {
+    if (details == null) return '';
+    if (details is String) return details;
+    try {
+      return jsonEncode(details);
+    } catch (_) {
+      return details.toString();
+    }
+  }
+
   String _projectRefFromUrl(String url) {
     try {
       final uri = Uri.parse(url);
@@ -43,13 +53,24 @@ class AdminRepository {
     }
   }
 
+  String _projectRefFromJwt(String token) {
+    final payload = _jwtPayload(token);
+    final iss = (payload?['iss'] ?? '').toString();
+    if (iss.isNotEmpty) {
+      final fromIss = _projectRefFromUrl(iss);
+      if (fromIss.isNotEmpty) return fromIss;
+    }
+    // Some tokens (e.g. anon key) include a direct "ref" claim.
+    final ref = (payload?['ref'] ?? '').toString();
+    return ref;
+  }
+
   void _logInvokeContext(String functionName) {
     final url = Env.supabaseUrl;
     final urlRef = _projectRefFromUrl(url);
     final token = _client.auth.currentSession?.accessToken;
     final looksJwt = token != null && token.split('.').length == 3;
-    final payload = token != null ? _jwtPayload(token) : null;
-    final tokenRef = (payload?['ref'] ?? '').toString();
+    final tokenRef = token != null ? _projectRefFromJwt(token) : '';
 
     logger.info(
       'Invoking Edge Function: $functionName',
@@ -61,8 +82,32 @@ class AdminRepository {
     );
   }
 
+  void _ensureTokenMatchesProject() {
+    final token = _client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) return;
+    final parts = token.split('.');
+    if (parts.length != 3) {
+      throw Exception('Not authenticated (invalid session token). Please sign out and sign in again.');
+    }
+
+    final urlRef = _projectRefFromUrl(Env.supabaseUrl);
+    final tokenRef = _projectRefFromJwt(token);
+    if (urlRef.isNotEmpty && tokenRef.isNotEmpty && urlRef != tokenRef) {
+      throw Exception(
+        'Supabase project mismatch. Your app is configured for "$urlRef" but your login session belongs to "$tokenRef". '
+        'This usually happens after changing SUPABASE_URL / SUPABASE_ANON_KEY. Please sign out and sign in again (or reinstall the app).',
+      );
+    }
+  }
+
   Future<void> _validateSessionToken() async {
     try {
+      _ensureTokenMatchesProject();
+      try {
+        await _client.auth.refreshSession();
+      } catch (_) {
+        // If refresh fails (offline, no refresh token, etc), continue and let getUser() decide.
+      }
       await _client.auth.getUser();
     } on AuthException catch (e) {
       throw Exception('Your session is invalid or expired. Please sign out and sign in again. (${e.message})');
@@ -73,6 +118,7 @@ class AdminRepository {
   }
 
   Map<String, String> _authHeaders() {
+    _ensureTokenMatchesProject();
     final token = _client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) {
       throw Exception('Not authenticated. Please sign in again.');
@@ -93,7 +139,16 @@ class AdminRepository {
       if (e.status == 404) {
         return 'Admin feature is not configured: Edge Function "$functionName" was not found. Deploy the required Supabase Edge Functions (admin_create_user, admin_delete_user, admin_send_reset).';
       }
-      return 'Edge Function "$functionName" failed (${e.status}): ${e.details ?? e.reasonPhrase ?? e.toString()}';
+      final detailsStr = _stringifyDetails(e.details);
+      final reason = detailsStr.isNotEmpty ? detailsStr : (e.reasonPhrase ?? e.toString());
+      if (e.status == 401 && reason.toLowerCase().contains('invalid jwt')) {
+        final urlRef = _projectRefFromUrl(Env.supabaseUrl);
+        final token = _client.auth.currentSession?.accessToken;
+        final tokenRef = token != null ? _projectRefFromJwt(token) : '';
+        final diag = 'appProject=$urlRef sessionProject=${tokenRef.isEmpty ? 'unknown' : tokenRef}';
+        return 'Authentication failed (invalid JWT). ($diag) Please sign out and sign in again. If appProject and sessionProject differ, your app is pointed to a different Supabase project than your session.';
+      }
+      return 'Edge Function "$functionName" failed (${e.status}): $reason';
     }
     return e.toString();
   }
@@ -123,7 +178,6 @@ class AdminRepository {
       final res = await _client.functions.invoke(
         'admin_create_user',
         body: payload,
-        headers: _authHeaders(),
       );
       if (res.status >= 400) {
         throw Exception('admin_create_user failed (${res.status}): ${res.data}');
@@ -142,7 +196,6 @@ class AdminRepository {
         body: {
           'user_id': userId,
         },
-        headers: _authHeaders(),
       );
       if (res.status >= 400) {
         throw Exception('admin_delete_user failed (${res.status}): ${res.data}');
@@ -173,7 +226,6 @@ class AdminRepository {
       final res = await _client.functions.invoke(
         'admin_send_reset',
         body: body,
-        headers: _authHeaders(),
       );
       if (res.status >= 400) {
         throw Exception('admin_send_reset failed (${res.status}): ${res.data}');

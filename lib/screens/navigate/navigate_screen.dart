@@ -8,7 +8,9 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../models/room.dart';
 import '../../repositories/profiles_repository.dart';
+import '../../services/room_service.dart';
 import '../../widgets/glass_container.dart';
 import 'ar_navigate_view.dart';
 import 'qr_start_screen.dart';
@@ -54,6 +56,8 @@ class _NavigateScreenState extends State<NavigateScreen> {
   String? _selectedDestination;
   bool _isAdmin = false;
   StreamSubscription<AuthState>? _authSub;
+  StreamSubscription<List<Room>>? _roomsSub;
+  List<String> _managedRooms = const <String>[];
 
   static const MethodChannel _arCoreChannel = MethodChannel('com.example.gabay/arcore');
 
@@ -153,6 +157,24 @@ class _NavigateScreenState extends State<NavigateScreen> {
     'Admin Offices': ['Admin Office 1', 'Admin Office 2', 'Admin Office 3', 'Admin Office 4', 'Admin Office 5'],
   };
 
+  Map<String, List<String>> get _categories {
+    final merged = <String, List<String>>{};
+    for (final entry in _mockCategories.entries) {
+      merged[entry.key] = List<String>.from(entry.value);
+    }
+
+    final existing = <String>{};
+    for (final list in merged.values) {
+      existing.addAll(list);
+    }
+
+    final managed = _managedRooms.where((r) => !existing.contains(r)).toList()..sort();
+    if (managed.isNotEmpty) {
+      merged['Managed Rooms'] = managed;
+    }
+    return merged;
+  }
+
   String _activeCategory = 'CL Rooms';
 
   // Camera controller for real preview
@@ -166,6 +188,7 @@ class _NavigateScreenState extends State<NavigateScreen> {
   void initState() {
     super.initState();
     _loadAdminStatus();
+    _subscribeManagedRooms();
 
     _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((_) {
       if (!mounted) return;
@@ -176,8 +199,29 @@ class _NavigateScreenState extends State<NavigateScreen> {
   @override
   void dispose() {
     _authSub?.cancel();
+    _roomsSub?.cancel();
     _cameraController.dispose();
     super.dispose();
+  }
+
+  void _subscribeManagedRooms() {
+    _roomsSub?.cancel();
+    try {
+      _roomsSub = RoomService.instance.streamAll().listen(
+        (rooms) {
+          final codes = rooms
+              .map((r) => r.code.trim())
+              .where((c) => c.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort();
+          if (mounted) {
+            setState(() => _managedRooms = codes);
+          }
+        },
+        onError: (_) {},
+      );
+    } catch (_) {}
   }
 
   Future<void> _loadAdminStatus() async {
@@ -376,7 +420,7 @@ class _NavigateScreenState extends State<NavigateScreen> {
   }
 
   void _openDestinationPicker() async {
-    final categories = _mockCategories.keys.toList();
+    final categories = _categories.keys.toList();
     final selected = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -431,9 +475,9 @@ class _NavigateScreenState extends State<NavigateScreen> {
                             Expanded(
                               child: ListView.builder(
                                 controller: scrollController,
-                                itemCount: _mockCategories[tempCategory]?.length ?? 0,
+                                itemCount: _categories[tempCategory]?.length ?? 0,
                                 itemBuilder: (context, index) {
-                                  final room = _mockCategories[tempCategory]![index];
+                                  final room = _categories[tempCategory]![index];
                                   return ListTile(
                                     contentPadding: const EdgeInsets.symmetric(horizontal: 4),
                                     leading: const Icon(Icons.room, color: Colors.white70),
@@ -460,7 +504,10 @@ class _NavigateScreenState extends State<NavigateScreen> {
     if (selected != null && selected.isNotEmpty) {
       setState(() {
         _selectedDestination = selected;
-        _activeCategory = _mockCategories.entries.firstWhere((e) => e.value.contains(selected)).key;
+        final matches = _categories.entries.where((e) => e.value.contains(selected)).toList();
+        if (matches.isNotEmpty) {
+          _activeCategory = matches.first.key;
+        }
       });
       if (mounted) {
         logger.info('Starting AR navigation from destination picker', tag: 'Navigate', error: {'room': selected});
@@ -500,7 +547,7 @@ class _NavigateScreenState extends State<NavigateScreen> {
           Positioned.fill(
             child: _ArMockOverlay(
               selectedDestination: _selectedDestination,
-              categories: _mockCategories,
+              categories: _categories,
               activeCategory: _activeCategory,
               onCategoryChange: (c) => setState(() => _activeCategory = c),
               onSelectRoom: (room) => _startAr(room),

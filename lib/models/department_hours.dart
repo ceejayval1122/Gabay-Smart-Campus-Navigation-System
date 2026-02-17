@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 @immutable
@@ -51,6 +53,7 @@ class DepartmentHours {
   Map<String, dynamic> toMap() => {
         'id': id,
         'name': name,
+        'department': name,
         'location': location,
         'phone': phone,
         'is_office': isOffice,
@@ -59,21 +62,50 @@ class DepartmentHours {
       };
 
   factory DepartmentHours.fromMap(Map<String, dynamic> map) {
-    final raw = (map['weekly_hours'] as Map).map((k, v) => MapEntry(k.toString(), v));
+    final weeklyAny = map['weekly_hours'];
+    Map<String, dynamic> raw;
+    if (weeklyAny is Map) {
+      raw = weeklyAny.map((k, v) => MapEntry(k.toString(), v));
+    } else if (weeklyAny is String) {
+      try {
+        final decoded = jsonDecode(weeklyAny);
+        if (decoded is Map) {
+          raw = decoded.map((k, v) => MapEntry(k.toString(), v));
+        } else {
+          raw = <String, dynamic>{};
+        }
+      } catch (_) {
+        raw = <String, dynamic>{};
+      }
+    } else {
+      raw = <String, dynamic>{};
+    }
+
     final parsed = <int, List<TimeRange>>{};
     for (final entry in raw.entries) {
       final dayIdx = int.tryParse(entry.key) ?? 0;
-      final list = (entry.value as List)
-          .map((e) => TimeRange.fromMap(Map<String, dynamic>.from(e as Map)))
+      final listAny = entry.value;
+      if (listAny is! List) continue;
+      final list = listAny
+          .whereType<Map>()
+          .map((e) => TimeRange.fromMap(Map<String, dynamic>.from(e)))
           .toList();
-      parsed[dayIdx] = list;
+      if (list.isNotEmpty) parsed[dayIdx] = list;
     }
+
+    final isOfficeAny = map['is_office'];
+    final bool isOffice = switch (isOfficeAny) {
+      bool v => v,
+      num v => v != 0,
+      String v => v.toLowerCase() == 'true' || v == '1' || v.toLowerCase() == 't',
+      _ => true,
+    };
     return DepartmentHours(
-      id: map['id'] as String,
-      name: map['name'] as String,
-      location: map['location'] as String,
-      phone: map['phone'] as String?,
-      isOffice: (map['is_office'] as bool?) ?? true,
+      id: map['id']?.toString() ?? '',
+      name: (map['name'] ?? map['department'])?.toString() ?? '',
+      location: (map['location'] ?? map['office_location'] ?? map['office'] ?? map['room'])?.toString() ?? '',
+      phone: (map['phone'] ?? map['contact'] ?? map['tel'])?.toString(),
+      isOffice: isOffice,
       weeklyHours: parsed,
     );
   }

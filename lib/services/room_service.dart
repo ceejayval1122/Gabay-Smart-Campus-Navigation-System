@@ -55,6 +55,7 @@ class RoomService {
             'name': data['name'],
             'building': data['building'],
             'dept_tag': data['deptTag'],
+            'capacity': data['capacity'],
           })
           .select()
           .single();
@@ -64,6 +65,30 @@ class RoomService {
       _emit();
       await _saveToLocal(_rooms);
       return newRoom;
+    } on PostgrestException catch (e) {
+      // If schema lacks 'code' or 'qr_code', retry without those columns
+      if (e.code == 'PGRST204') {
+        final data = room.toJson();
+        final payload = <String, dynamic>{
+          'id': data['id'] ?? room.id,
+          'name': data['name'],
+          if (data['building'] != null) 'building': data['building'],
+          if (data['deptTag'] != null) 'dept_tag': data['deptTag'],
+          if (data['capacity'] != null) 'capacity': data['capacity'],
+        };
+        final response = await _supabase
+            .from(_tableName)
+            .insert(payload)
+            .select()
+            .single();
+        final newRoom = Room.fromJson(response);
+        _rooms.add(newRoom);
+        _emit();
+        await _saveToLocal(_rooms);
+        return newRoom;
+      }
+      print('Error creating room: $e');
+      rethrow;
     } catch (e) {
       print('Error creating room: $e');
       rethrow;
@@ -210,7 +235,13 @@ class RoomService {
   }
 
   // For backward compatibility
-  Stream<List<Room>> list() => streamAll();
+  Stream<List<Room>> list() {
+    if (!_isInitialized && !_isInitializing) {
+      initialize();
+    }
+    Future.microtask(() => _emit());
+    return _controller.stream;
+  }
   
   // Get the first room or null if empty
   Room? get current => _rooms.isNotEmpty ? _rooms.first : null;

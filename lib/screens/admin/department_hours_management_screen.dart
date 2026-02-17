@@ -58,6 +58,18 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
                   child: StreamBuilder<List<DepartmentHours>>(
                     stream: DepartmentHoursService.instance.list(),
                     builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return Center(
+                          child: GlassContainer(
+                            padding: const EdgeInsets.all(16),
+                            child: Text(
+                              'Failed to load departments: ${snapshot.error}',
+                              style: const TextStyle(color: Colors.white70),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        );
+                      }
                       final items = snapshot.data ?? const <DepartmentHours>[];
                       if (items.isEmpty) {
                         return Center(
@@ -189,9 +201,26 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
                   const SizedBox(width: 8),
                   TextButton(
                     onPressed: () async {
-                      await DepartmentHoursService.instance.delete(id);
-                      // ignore: use_build_context_synchronously
-                      Navigator.pop(ctx);
+                      try {
+                        await DepartmentHoursService.instance.delete(id);
+                        // ignore: use_build_context_synchronously
+                        Navigator.pop(ctx);
+                        // ignore: use_build_context_synchronously
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Department/Office deleted'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+                      } catch (e) {
+                        // ignore: use_build_context_synchronously
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to delete: $e'),
+                            backgroundColor: Colors.red,
+                          ),
+                        );
+                      }
                     },
                     style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
                     child: const Text('Delete'),
@@ -250,14 +279,17 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
     final phoneCtrl = TextEditingController(text: existing?.phone ?? '');
     bool isOffice = existing?.isOffice ?? true;
 
-    // One field per day, comma-separated time ranges as HH:MM-HH:MM
-    final dayCtrls = List.generate(7, (i) => TextEditingController());
-    if (existing != null) {
-      for (var day = 0; day < 7; day++) {
-        final ranges = existing.weeklyHours[day] ?? const <TimeRange>[];
-        dayCtrls[day].text = ranges.map((r) => '${r.start}-${r.end}').join(',');
+    List<TimeRange> pickFirstWeekday(DepartmentHours d) {
+      for (final idx in const [1, 2, 3, 4, 5]) {
+        final r = d.weeklyHours[idx];
+        if (r != null && r.isNotEmpty) return List<TimeRange>.from(r);
       }
+      return <TimeRange>[];
     }
+
+    List<TimeRange> weekdayRanges = existing == null ? <TimeRange>[] : pickFirstWeekday(existing);
+    List<TimeRange> saturdayRanges = existing == null ? <TimeRange>[] : List<TimeRange>.from(existing.weeklyHours[6] ?? const <TimeRange>[]);
+    List<TimeRange> sundayRanges = existing == null ? <TimeRange>[] : List<TimeRange>.from(existing.weeklyHours[0] ?? const <TimeRange>[]);
 
     final formKey = GlobalKey<FormState>();
 
@@ -274,6 +306,75 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
             radius: 16,
             child: StatefulBuilder(
               builder: (ctx2, setModalState) {
+                String hhmm(TimeOfDay t) => '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+                int minutes(TimeOfDay t) => t.hour * 60 + t.minute;
+
+                Future<void> addRange(List<TimeRange> target) async {
+                  final start = await showTimePicker(
+                    context: ctx2,
+                    initialTime: TimeOfDay.now(),
+                    builder: (c, child) => Theme(
+                      data: Theme.of(c).copyWith(
+                        timePickerTheme: const TimePickerThemeData(backgroundColor: Color(0xFF1E2931)),
+                        colorScheme: const ColorScheme.dark(
+                          primary: Color(0xFF63C1E3),
+                          surface: Color(0xFF1E2931),
+                          onSurface: Colors.white,
+                        ),
+                      ),
+                      child: child!,
+                    ),
+                  );
+                  if (start == null) return;
+                  final end = await showTimePicker(
+                    context: ctx2,
+                    initialTime: TimeOfDay.now(),
+                    builder: (c, child) => Theme(
+                      data: Theme.of(c).copyWith(
+                        timePickerTheme: const TimePickerThemeData(backgroundColor: Color(0xFF1E2931)),
+                        colorScheme: const ColorScheme.dark(
+                          primary: Color(0xFF63C1E3),
+                          surface: Color(0xFF1E2931),
+                          onSurface: Colors.white,
+                        ),
+                      ),
+                      child: child!,
+                    ),
+                  );
+                  if (end == null) return;
+                  if (minutes(start) >= minutes(end)) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Start time must be before end time.')),
+                    );
+                    return;
+                  }
+                  setModalState(() {
+                    target.add(TimeRange(hhmm(start), hhmm(end)));
+                    target.sort((a, b) => a.start.compareTo(b.start));
+                  });
+                }
+
+                Widget rangeChips(List<TimeRange> ranges) {
+                  if (ranges.isEmpty) {
+                    return const Text('Closed', style: TextStyle(color: Colors.white70));
+                  }
+                  return Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (int i = 0; i < ranges.length; i++)
+                        InputChip(
+                          label: Text('${ranges[i].start} - ${ranges[i].end}', style: const TextStyle(color: Color(0xFF63C1E3))),
+                          backgroundColor: Colors.white.withOpacity(0.08),
+                          deleteIconColor: Colors.white70,
+                          onDeleted: () => setModalState(() => ranges.removeAt(i)),
+                        ),
+                    ],
+                  );
+                }
+
                 return SingleChildScrollView(
                   child: Form(
                     key: formKey,
@@ -323,7 +424,73 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
                           activeColor: const Color(0xFF63C1E3),
                         ),
                         const SizedBox(height: 12),
-                        _HoursEditor(dayCtrls: dayCtrls),
+                        const Text('Weekly Hours', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 8),
+                        GlassContainer(
+                          radius: 12,
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Mon - Fri', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 8),
+                              rangeChips(weekdayRanges),
+                              const SizedBox(height: 8),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton.icon(
+                                  onPressed: () => addRange(weekdayRanges),
+                                  icon: const Icon(Icons.access_time, color: Colors.white70, size: 18),
+                                  label: const Text('Add time range', style: TextStyle(color: Colors.white70)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        GlassContainer(
+                          radius: 12,
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Saturday', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 8),
+                              rangeChips(saturdayRanges),
+                              const SizedBox(height: 8),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton.icon(
+                                  onPressed: () => addRange(saturdayRanges),
+                                  icon: const Icon(Icons.access_time, color: Colors.white70, size: 18),
+                                  label: const Text('Add time range', style: TextStyle(color: Colors.white70)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        GlassContainer(
+                          radius: 12,
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Sunday', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 8),
+                              rangeChips(sundayRanges),
+                              const SizedBox(height: 8),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton.icon(
+                                  onPressed: () => addRange(sundayRanges),
+                                  icon: const Icon(Icons.access_time, color: Colors.white70, size: 18),
+                                  label: const Text('Add time range', style: TextStyle(color: Colors.white70)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                         const SizedBox(height: 8),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.end,
@@ -336,11 +503,29 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
                             ElevatedButton(
                               onPressed: () async {
                                 if (!formKey.currentState!.validate()) return;
+                                
+                                // Validate that at least one time range is added
+                                if (weekdayRanges.isEmpty && saturdayRanges.isEmpty && sundayRanges.isEmpty) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Please add at least one time range'),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
+                                  return;
+                                }
+                                
                                 final weekly = <int, List<TimeRange>>{};
-                                for (var day = 0; day < 7; day++) {
-                                  final text = dayCtrls[day].text.trim();
-                                  final ranges = _parseRanges(text);
-                                  if (ranges.isNotEmpty) weekly[day] = ranges;
+                                if (weekdayRanges.isNotEmpty) {
+                                  for (int d = 1; d <= 5; d++) {
+                                    weekly[d] = List<TimeRange>.from(weekdayRanges);
+                                  }
+                                }
+                                if (saturdayRanges.isNotEmpty) {
+                                  weekly[6] = List<TimeRange>.from(saturdayRanges);
+                                }
+                                if (sundayRanges.isNotEmpty) {
+                                  weekly[0] = List<TimeRange>.from(sundayRanges);
                                 }
                                 final item = DepartmentHours(
                                   id: existing?.id ?? const Uuid().v4(),
@@ -350,12 +535,30 @@ class _DepartmentHoursManagementScreenState extends State<DepartmentHoursManagem
                                   isOffice: isOffice,
                                   weeklyHours: weekly,
                                 );
-                                if (existing == null) {
-                                  await DepartmentHoursService.instance.create(item);
-                                } else {
-                                  await DepartmentHoursService.instance.upsert(item);
+                                try {
+                                  if (existing == null) {
+                                    await DepartmentHoursService.instance.create(item);
+                                  } else {
+                                    await DepartmentHoursService.instance.upsert(item);
+                                  }
+                                  if (!context.mounted) return;
+                                  Navigator.pop(ctx);
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(existing == null ? 'Department/Office created' : 'Department/Office updated'),
+                                      backgroundColor: Colors.green,
+                                      duration: const Duration(seconds: 3),
+                                    ),
+                                  );
+                                } catch (e) {
+                                  if (!context.mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Failed to save: $e'),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
                                 }
-                                if (context.mounted) Navigator.pop(ctx);
                               },
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF63C1E3),

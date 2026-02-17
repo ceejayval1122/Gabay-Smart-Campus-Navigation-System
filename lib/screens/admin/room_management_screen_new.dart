@@ -2,15 +2,18 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../../models/room.dart';
 import '../../services/room_service.dart';
 import '../../models/schedule.dart';
 import '../../services/schedule_service.dart';
 import '../../widgets/glass_container.dart';
+import '../../navigation/room_coordinates_service.dart';
 
 class RoomManagementScreen extends StatefulWidget {
   const RoomManagementScreen({super.key});
@@ -40,6 +43,224 @@ class _RoomManagementScreenState extends State<RoomManagementScreen> {
     super.dispose();
   }
 
+  Future<void> _showCoordinatesDialog(Room room) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = room.code;
+
+    final latCtrl = TextEditingController(text: prefs.getDouble('coord_${key}_lat')?.toString() ?? '');
+    final lonCtrl = TextEditingController(text: prefs.getDouble('coord_${key}_lon')?.toString() ?? '');
+    final heightCtrl = TextEditingController(text: prefs.getDouble('coord_${key}_height')?.toString() ?? '');
+    final floorCtrl = TextEditingController(text: prefs.getInt('coord_${key}_floor')?.toString() ?? '');
+
+    if (!mounted) {
+      latCtrl.dispose();
+      lonCtrl.dispose();
+      heightCtrl.dispose();
+      floorCtrl.dispose();
+      return;
+    }
+
+    Future<void> useCurrentLocation(StateSetter setDialogState) async {
+      final status = await Permission.location.request();
+      if (!status.isGranted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Location permission is required')),
+          );
+        }
+        return;
+      }
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 10),
+        );
+        setDialogState(() {
+          latCtrl.text = position.latitude.toStringAsFixed(6);
+          lonCtrl.text = position.longitude.toStringAsFixed(6);
+          if (heightCtrl.text.trim().isEmpty) {
+            final floor = int.tryParse(floorCtrl.text.trim()) ?? 1;
+            heightCtrl.text = ((floor - 1) * 3.0).toStringAsFixed(1);
+          }
+        });
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to get current location')),
+          );
+        }
+      }
+    }
+
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.transparent,
+        contentPadding: EdgeInsets.zero,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        content: GlassContainer(
+          radius: 20,
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+          child: StatefulBuilder(
+            builder: (context, setDialogState) {
+              return SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Set Coordinates',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${room.code} - ${room.name}',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: latCtrl,
+                      style: const TextStyle(color: Colors.white),
+                      cursorColor: Colors.white,
+                      decoration: const InputDecoration(
+                        labelText: 'Latitude',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
+                        focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF63C1E3))),
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: lonCtrl,
+                      style: const TextStyle(color: Colors.white),
+                      cursorColor: Colors.white,
+                      decoration: const InputDecoration(
+                        labelText: 'Longitude',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
+                        focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF63C1E3))),
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: heightCtrl,
+                            style: const TextStyle(color: Colors.white),
+                            cursorColor: Colors.white,
+                            decoration: const InputDecoration(
+                              labelText: 'Height (m)',
+                              labelStyle: TextStyle(color: Colors.white70),
+                              enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
+                              focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF63C1E3))),
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: floorCtrl,
+                            style: const TextStyle(color: Colors.white),
+                            cursorColor: Colors.white,
+                            decoration: const InputDecoration(
+                              labelText: 'Floor',
+                              labelStyle: TextStyle(color: Colors.white70),
+                              enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
+                              focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF63C1E3))),
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        TextButton.icon(
+                          onPressed: () => useCurrentLocation(setDialogState),
+                          icon: const Icon(Icons.my_location, color: Colors.white70, size: 18),
+                          label: const Text('Use Current', style: TextStyle(color: Colors.white70)),
+                        ),
+                        Row(
+                          children: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx),
+                              child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton(
+                              onPressed: () async {
+                                final latText = latCtrl.text.trim();
+                                final lonText = lonCtrl.text.trim();
+                                final heightText = heightCtrl.text.trim();
+                                final floorText = floorCtrl.text.trim();
+
+                                if (latText.isEmpty) {
+                                  await prefs.remove('coord_${key}_lat');
+                                } else {
+                                  final lat = double.tryParse(latText);
+                                  if (lat != null) await prefs.setDouble('coord_${key}_lat', lat);
+                                }
+                                if (lonText.isEmpty) {
+                                  await prefs.remove('coord_${key}_lon');
+                                } else {
+                                  final lon = double.tryParse(lonText);
+                                  if (lon != null) await prefs.setDouble('coord_${key}_lon', lon);
+                                }
+                                if (heightText.isEmpty) {
+                                  await prefs.remove('coord_${key}_height');
+                                } else {
+                                  final height = double.tryParse(heightText);
+                                  if (height != null) await prefs.setDouble('coord_${key}_height', height);
+                                }
+                                if (floorText.isEmpty) {
+                                  await prefs.remove('coord_${key}_floor');
+                                } else {
+                                  final floor = int.tryParse(floorText);
+                                  if (floor != null) await prefs.setInt('coord_${key}_floor', floor);
+                                }
+
+                                await RoomCoordinatesService().loadCoordinates(force: true);
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Coordinates saved'), backgroundColor: Colors.green),
+                                  );
+                                }
+                                // ignore: use_build_context_synchronously
+                                Navigator.pop(ctx);
+                              },
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF63C1E3),
+                                foregroundColor: Colors.white,
+                                shape: const StadiumBorder(),
+                              ),
+                              child: const Text('Save'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    latCtrl.dispose();
+    lonCtrl.dispose();
+    heightCtrl.dispose();
+    floorCtrl.dispose();
+  }
+
   void _showActionsDialog(Room room) {
     showDialog(
       context: context,
@@ -67,6 +288,14 @@ class _RoomManagementScreenState extends State<RoomManagementScreen> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _showQRCodeDialog(room);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.my_location, color: Colors.white70),
+                title: const Text('Set Coordinates', style: TextStyle(color: Colors.white)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showCoordinatesDialog(room);
                 },
               ),
               ListTile(
@@ -233,11 +462,40 @@ class _RoomManagementScreenState extends State<RoomManagementScreen> {
                     ElevatedButton(
                       onPressed: () async {
                         if (_formKey.currentState!.validate()) {
+                          await RoomService.instance.listAll();
+                          final codeUpper = _codeController.text.toUpperCase().trim();
+                          final nameTrim = _nameController.text.trim();
+                          final rooms = RoomService.instance.rooms;
+                          final dupCode = rooms.any((r) {
+                            if (_editingRoom != null && r.id == _editingRoom!.id) return false;
+                            return r.code.trim().toUpperCase() == codeUpper;
+                          });
+                          final dupName = rooms.any((r) {
+                            if (_editingRoom != null && r.id == _editingRoom!.id) return false;
+                            return r.name.trim().toLowerCase() == nameTrim.toLowerCase();
+                          });
+
+                          if (dupCode || dupName) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    dupCode
+                                        ? 'A room with this code already exists'
+                                        : 'A room with this name already exists',
+                                  ),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                            return;
+                          }
+
                           final room = Room(
                             id: _editingRoom?.id ?? const Uuid().v4(),
                             qrCode: 'ROOM_${_codeController.text.toUpperCase()}_${const Uuid().v4().substring(0, 6)}',
-                            code: _codeController.text.toUpperCase(),
-                            name: _nameController.text,
+                            code: codeUpper,
+                            name: nameTrim,
                             deptTag: _deptController.text.isEmpty ? null : _deptController.text,
                           );
 

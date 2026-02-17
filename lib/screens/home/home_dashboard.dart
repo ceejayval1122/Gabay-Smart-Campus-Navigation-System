@@ -390,6 +390,7 @@ class _HeaderCardState extends State<_HeaderCard> {
                               statusColor = Colors.lightGreenAccent;
                               break;
                             case 'declined':
+                            case 'rejected':
                               icon = Icons.cancel;
                               statusColor = Colors.redAccent;
                               break;

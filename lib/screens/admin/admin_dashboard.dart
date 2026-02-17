@@ -104,25 +104,41 @@ class _AdminDashboardState extends State<AdminDashboard> {
       );
       return;
     }
-    await NewsService.instance.publish(
-      type: PostType.announcement,
-      title: title,
-      body: body.isEmpty ? null : body,
-      deptTag: _scope == 'building' ? (_deptTag?.trim().isEmpty == true ? null : _deptTag?.trim()) : null,
-      scheduledAt: _scheduleEnabled ? _scheduledAt : null,
-    );
-    _titleCtrl.clear();
-    _bodyCtrl.clear();
-    setState(() {
-      _scope = 'all';
-      _deptTag = null;
-      _scheduleEnabled = false;
-      _scheduledAt = null;
-    });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Announcement published')),
+    try {
+      await NewsService.instance.publish(
+        type: PostType.announcement,
+        title: title,
+        body: body.isEmpty ? null : body,
+        deptTag: _scope == 'building' ? (_deptTag?.trim().isEmpty == true ? null : _deptTag?.trim()) : null,
+        scheduledAt: _scheduleEnabled ? _scheduledAt : null,
       );
+      _titleCtrl.clear();
+      _bodyCtrl.clear();
+      setState(() {
+        _scope = 'all';
+        _deptTag = null;
+        _scheduleEnabled = false;
+        _scheduledAt = null;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Announcement published'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to publish announcement: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     }
   }
 

@@ -37,18 +37,81 @@ class NewsService {
   }) async {
     final id = const Uuid().v4();
     final now = DateTime.now();
-    final payload = {
+    final t = title.trim();
+    final b = body?.trim();
+    final content = (b == null || b.isEmpty) ? t : b;
+    Map<String, dynamic> payload = {
       'id': id,
       'type': type.name,
-      'title': title.trim(),
-      'body': body?.trim(),
-      'dept_tag': deptTag?.trim(),
+      'title': t,
+      'content': content,
+      'body': content,
+      if (deptTag?.trim().isNotEmpty == true) 'dept_tag': deptTag!.trim(),
       'created_at': now.toIso8601String(),
-      'scheduled_at': scheduledAt?.toIso8601String(),
+      if (scheduledAt != null) 'scheduled_at': scheduledAt.toIso8601String(),
       'pinned': pinned,
     };
+    
+    // Retry logic for missing columns
+    for (var i = 0; i < 5; i++) {
+      try {
+        final inserted = await _supabase.from(_table).insert(payload).select().single();
+        return NewsPost.fromMap(inserted as Map<String, dynamic>);
+      } on PostgrestException catch (e) {
+        print('DEBUG: NewsService publish error: ${e.code} - ${e.message}');
+        if (e.code != 'PGRST204' && e.code != '42703') rethrow;
+        final next = _removeMissingColumnIfPossible(payload, e);
+        print('DEBUG: Retrying with payload: $next');
+        if (identical(next, payload)) rethrow;
+        payload = next;
+      }
+    }
     final inserted = await _supabase.from(_table).insert(payload).select().single();
     return NewsPost.fromMap(inserted as Map<String, dynamic>);
+  }
+
+  Map<String, dynamic> _removeMissingColumnIfPossible(Map<String, dynamic> payload, PostgrestException e) {
+    final msg = e.message;
+    String? bad;
+
+    // Supabase/PostgREST can format this in a few different ways depending on the operation.
+    final patterns = <RegExp>[
+      RegExp(
+        r"could not find the '([^']+)' column of (?:'news'|news)",
+        caseSensitive: false,
+      ),
+      RegExp(
+        r"column '([^']+)' of relation 'news' does not exist",
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'column "([^"]+)" of relation "news" does not exist',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'column news\\.([a-zA-Z0-9_]+) does not exist',
+        caseSensitive: false,
+      ),
+      // Handle the specific case where it says column "news" of relation "news" does not exist
+      // This usually means there's an issue with the table structure or query
+      RegExp(
+        r'column "news" of relation "news" does not exist',
+        caseSensitive: false,
+      ),
+    ];
+
+    for (final p in patterns) {
+      final m = p.firstMatch(msg);
+      if (m != null) {
+        bad = m.groupCount >= 1 ? m.group(1) : null;
+        break;
+      }
+    }
+
+    if (bad == null || !payload.containsKey(bad)) return payload;
+    final next = Map<String, dynamic>.from(payload);
+    next.remove(bad);
+    return next;
   }
 
   Future<void> delete(String id) async {
