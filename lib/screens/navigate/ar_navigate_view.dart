@@ -89,6 +89,26 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
   static const double _lineStartOffsetMeters = 0.8;
   static const double _lineLiftMeters = 0.02;
 
+  double _maxLineMetersForDistance(double distanceMeters) {
+    if (distanceMeters <= 20) return _maxRenderableSegmentMeters;
+    if (distanceMeters <= 60) return 8.0;
+    return 6.0;
+  }
+
+  double _beaconWidthForDistance(double distanceMeters) {
+    final d = distanceMeters.clamp(0.0, 120.0).toDouble();
+    final t = math.sqrt(d / 120.0);
+    final w = 0.25 + (0.07 - 0.25) * t;
+    return w.clamp(0.07, 0.25).toDouble();
+  }
+
+  double _destMarkerScaleForDistance(double distanceMeters) {
+    final d = distanceMeters.clamp(0.0, 120.0).toDouble();
+    final t = math.sqrt(d / 120.0);
+    final s = 0.25 + (0.10 - 0.25) * t;
+    return s.clamp(0.10, 0.25).toDouble();
+  }
+
   Future<Position?> _awaitGpsFix({
     Duration timeout = const Duration(seconds: 12),
     double maxAccuracyMeters = 15.0,
@@ -281,12 +301,34 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
 
     // Use camera-relative coordinates for consistent centering
     final camPos = camPose.getTranslation();
-    
+
     // Ground-align route visuals relative to camera height.
     final groundY = (_worldOrigin?.y ?? camPos.y) - 1.2;
-    
+
     // Start line from camera position projected to ground for perfect centering
-    final startGround = vm.Vector3(camPos.x, groundY, camPos.z);
+    vm.Vector3 startGround;
+    final zCol = camPose.getColumn(2); // camera forward is -Z
+    final forward = vm.Vector3(-zCol.x, -zCol.y, -zCol.z);
+    final forwardLen = forward.length;
+    if (forwardLen > 0.0001) {
+      final f = forward / forwardLen;
+      final denom = f.y;
+      if (denom.abs() > 0.05) {
+        final t = (groundY - camPos.y) / denom;
+        if (t.isFinite && t > 0.2 && t < 10.0) {
+          startGround = vm.Vector3(camPos.x + f.x * t, groundY, camPos.z + f.z * t);
+        } else {
+          startGround = vm.Vector3(camPos.x, groundY, camPos.z);
+        }
+      } else {
+        var flat = vm.Vector3(f.x, 0, f.z);
+        if (flat.length < 0.0001) flat = vm.Vector3(0, 0, -1);
+        flat.normalize();
+        startGround = vm.Vector3(camPos.x, groundY, camPos.z) + flat * 0.6;
+      }
+    } else {
+      startGround = vm.Vector3(camPos.x, groundY, camPos.z);
+    }
     final endGround = vm.Vector3(targetWorld.x, groundY, targetWorld.z);
     final seg = endGround - startGround;
     final segLen = seg.length;
@@ -295,12 +337,16 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       _lastDebugError = '';
     });
 
-    final renderLen = segLen.clamp(0.0, _maxRenderableSegmentMeters).toDouble();
+    final maxRenderLen = _maxLineMetersForDistance(segLen);
+    final renderLen = segLen.clamp(0.0, maxRenderLen).toDouble();
     final dir = (segLen <= 0.0001) ? vm.Vector3.zero() : (seg / segLen);
     final renderEndGround = (segLen <= 0.0001) ? startGround : startGround + dir * renderLen;
     final startLineGround = (renderLen > _lineStartOffsetMeters) ? (startGround + dir * _lineStartOffsetMeters) : startGround;
     final renderSeg = renderEndGround - startLineGround;
     final renderSegLen = renderSeg.length;
+
+    final beaconWidth = _beaconWidthForDistance(segLen);
+    final destScale = _destMarkerScaleForDistance(segLen);
 
     // Straight route line from camera-center toward destination (ground-aligned).
     if (renderSegLen > _minRenderableSegmentMeters) {
@@ -347,15 +393,17 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
     }
 
     // Destination beacon: vertical pillar from route end up toward the destination height.
-    final beaconHeightNum = (targetWorld.y - groundY).clamp(_beaconMinHeightMeters, 12.0);
-    final beaconHeight = beaconHeightNum.toDouble();
+    final tDist = math.sqrt(segLen.clamp(0.0, 120.0) / 120.0);
+    final minBeaconH = (_beaconMinHeightMeters * (1.0 + (0.55 - 1.0) * tDist)).clamp(1.6, _beaconMinHeightMeters);
+    final beaconHeightNum = (targetWorld.y - groundY).clamp(minBeaconH, 12.0);
+    final beaconHeight = (beaconHeightNum as num).toDouble();
     try {
       final beaconPos = renderEndGround + vm.Vector3(0, beaconHeight / 2, 0);
       if (_routeBeaconNode == null) {
         final beacon = ARNode(
           type: NodeType.coloredBox,
           uri: 'coloredBox',
-          scale: vm.Vector3(0.25, beaconHeight, 0.25),
+          scale: vm.Vector3(beaconWidth, beaconHeight, beaconWidth),
           position: beaconPos,
         );
         final added = await objectManager?.addNode(beacon);
@@ -369,7 +417,7 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
         node.transform = vm.Matrix4.compose(
           beaconPos,
           vm.Quaternion.identity(),
-          vm.Vector3(0.25, beaconHeight, 0.25),
+          vm.Vector3(beaconWidth, beaconHeight, beaconWidth),
         );
       }
     } catch (e, st) {
@@ -377,6 +425,17 @@ class _ARNavigateViewState extends State<ARNavigateView> with WidgetsBindingObse
       if (mounted) setState(() {
         _lastDebugError = 'beacon: ${e.runtimeType}';
       });
+    }
+
+    if (_destNode != null) {
+      try {
+        final markerPos = targetWorld + vm.Vector3(0, 0.4, 0);
+        _destNode!.transform = vm.Matrix4.compose(
+          markerPos,
+          vm.Quaternion.identity(),
+          vm.Vector3(destScale, destScale, destScale),
+        );
+      } catch (_) {}
     }
 
     _updateDistance();
