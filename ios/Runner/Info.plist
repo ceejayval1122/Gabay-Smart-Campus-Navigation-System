@@ -45,6 +45,12 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>This app uses the camera for augmented reality navigation.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app uses your location to provide real-time navigation to campus destinations.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>This app uses your location to provide real-time navigation to campus destinations.</string>
 	<!-- Deep linking for Supabase auth -->
 	<key>CFBundleURLTypes</key>
 	<array>

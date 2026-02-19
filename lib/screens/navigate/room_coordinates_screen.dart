@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../navigation/map_data.dart';
+import '../../navigation/room_coordinates_service.dart';
 import '../../core/debug_logger.dart';
 
 class RoomCoordinatesScreen extends StatefulWidget {
@@ -28,39 +28,67 @@ class _RoomCoordinatesScreenState extends State<RoomCoordinatesScreen> {
   }
 
   Future<void> _loadCoordinates() async {
-    final prefs = await SharedPreferences.getInstance();
+    final svc = RoomCoordinatesService();
+    await svc.loadCoordinates(force: true);
     
     // Initialize controllers for all predefined rooms
     for (final room in kRoomToWaypoint.keys) {
       _nameControllers[room] = TextEditingController(text: room);
-      _latControllers[room] = TextEditingController(text: prefs.getDouble('coord_${room}_lat')?.toString() ?? '');
-      _lonControllers[room] = TextEditingController(text: prefs.getDouble('coord_${room}_lon')?.toString() ?? '');
-      _heightControllers[room] = TextEditingController(text: prefs.getDouble('coord_${room}_height')?.toString() ?? '');
-      _floorControllers[room] = TextEditingController(text: prefs.getInt('coord_${room}_floor')?.toString() ?? '');
+      final existing = svc.getCoordinates(room);
+      final existingFloor = svc.getFloor(room);
+      _latControllers[room] = TextEditingController(text: existing?.z.toString() ?? '');
+      _lonControllers[room] = TextEditingController(text: existing?.x.toString() ?? '');
+      _heightControllers[room] = TextEditingController(text: existing?.y.toString() ?? '');
+      _floorControllers[room] = TextEditingController(text: existingFloor?.toString() ?? '');
     }
     setState(() {});
   }
 
   Future<void> _saveCoordinates() async {
-    final prefs = await SharedPreferences.getInstance();
-    
-    for (final room in kRoomToWaypoint.keys) {
-      final lat = double.tryParse(_latControllers[room]?.text ?? '');
-      final lon = double.tryParse(_lonControllers[room]?.text ?? '');
-      final height = double.tryParse(_heightControllers[room]?.text ?? '');
-      final floor = int.tryParse(_floorControllers[room]?.text ?? '');
-      
-      if (lat != null) await prefs.setDouble('coord_${room}_lat', lat);
-      if (lon != null) await prefs.setDouble('coord_${room}_lon', lon);
-      if (height != null) await prefs.setDouble('coord_${room}_height', height);
-      if (floor != null) await prefs.setInt('coord_${room}_floor', floor);
-    }
-    
-    logger.info('Room coordinates saved', tag: 'RoomCoords');
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Room coordinates saved')),
-      );
+    final svc = RoomCoordinatesService();
+    try {
+      for (final room in kRoomToWaypoint.keys) {
+        final latText = _latControllers[room]?.text.trim() ?? '';
+        final lonText = _lonControllers[room]?.text.trim() ?? '';
+        final heightText = _heightControllers[room]?.text.trim() ?? '';
+        final floorText = _floorControllers[room]?.text.trim() ?? '';
+
+        if (latText.isEmpty && lonText.isEmpty) {
+          await svc.clearCoordinates(room);
+          continue;
+        }
+
+        final lat = double.tryParse(latText);
+        final lon = double.tryParse(lonText);
+        if (lat == null || lon == null) continue;
+
+        final height = double.tryParse(heightText) ?? 0.0;
+        final floor = int.tryParse(floorText) ?? 1;
+
+        await svc.upsertCoordinates(
+          roomCode: room,
+          lat: lat,
+          lon: lon,
+          height: height,
+          floor: floor,
+        );
+      }
+
+      await svc.loadCoordinates(force: true);
+
+      logger.info('Room coordinates saved', tag: 'RoomCoords');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Room coordinates saved')),
+        );
+      }
+    } catch (e, st) {
+      logger.error('Failed to save room coordinates', tag: 'RoomCoords', error: e, stackTrace: st);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save coordinates: $e')),
+        );
+      }
     }
   }
 

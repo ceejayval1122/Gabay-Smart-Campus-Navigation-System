@@ -6,7 +6,6 @@ import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../../models/room.dart';
 import '../../services/room_service.dart';
@@ -44,13 +43,17 @@ class _RoomManagementScreenState extends State<RoomManagementScreen> {
   }
 
   Future<void> _showCoordinatesDialog(Room room) async {
-    final prefs = await SharedPreferences.getInstance();
     final key = room.code;
 
-    final latCtrl = TextEditingController(text: prefs.getDouble('coord_${key}_lat')?.toString() ?? '');
-    final lonCtrl = TextEditingController(text: prefs.getDouble('coord_${key}_lon')?.toString() ?? '');
-    final heightCtrl = TextEditingController(text: prefs.getDouble('coord_${key}_height')?.toString() ?? '');
-    final floorCtrl = TextEditingController(text: prefs.getInt('coord_${key}_floor')?.toString() ?? '');
+    final svc = RoomCoordinatesService();
+    await svc.loadCoordinates();
+    final existing = svc.getCoordinates(key);
+    final existingFloor = svc.getFloor(key);
+
+    final latCtrl = TextEditingController(text: existing?.z.toString() ?? '');
+    final lonCtrl = TextEditingController(text: existing?.x.toString() ?? '');
+    final heightCtrl = TextEditingController(text: existing?.y.toString() ?? '');
+    final floorCtrl = TextEditingController(text: existingFloor?.toString() ?? '');
 
     if (!mounted) {
       latCtrl.dispose();
@@ -201,39 +204,47 @@ class _RoomManagementScreenState extends State<RoomManagementScreen> {
                                 final heightText = heightCtrl.text.trim();
                                 final floorText = floorCtrl.text.trim();
 
-                                if (latText.isEmpty) {
-                                  await prefs.remove('coord_${key}_lat');
-                                } else {
-                                  final lat = double.tryParse(latText);
-                                  if (lat != null) await prefs.setDouble('coord_${key}_lat', lat);
-                                }
-                                if (lonText.isEmpty) {
-                                  await prefs.remove('coord_${key}_lon');
-                                } else {
-                                  final lon = double.tryParse(lonText);
-                                  if (lon != null) await prefs.setDouble('coord_${key}_lon', lon);
-                                }
-                                if (heightText.isEmpty) {
-                                  await prefs.remove('coord_${key}_height');
-                                } else {
-                                  final height = double.tryParse(heightText);
-                                  if (height != null) await prefs.setDouble('coord_${key}_height', height);
-                                }
-                                if (floorText.isEmpty) {
-                                  await prefs.remove('coord_${key}_floor');
-                                } else {
-                                  final floor = int.tryParse(floorText);
-                                  if (floor != null) await prefs.setInt('coord_${key}_floor', floor);
-                                }
+                                try {
+                                  if (latText.isEmpty && lonText.isEmpty) {
+                                    await svc.clearCoordinates(key);
+                                  } else {
+                                    final lat = double.tryParse(latText);
+                                    final lon = double.tryParse(lonText);
+                                    final height = double.tryParse(heightText) ?? 0.0;
+                                    final floor = int.tryParse(floorText) ?? 1;
+                                    if (lat == null || lon == null) {
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(content: Text('Please enter valid latitude and longitude'), backgroundColor: Colors.red),
+                                        );
+                                      }
+                                      return;
+                                    }
 
-                                await RoomCoordinatesService().loadCoordinates(force: true);
-                                if (mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Coordinates saved'), backgroundColor: Colors.green),
-                                  );
+                                    await svc.upsertCoordinates(
+                                      roomCode: key,
+                                      lat: lat,
+                                      lon: lon,
+                                      height: height,
+                                      floor: floor,
+                                    );
+                                  }
+
+                                  await svc.loadCoordinates(force: true);
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Coordinates saved'), backgroundColor: Colors.green),
+                                    );
+                                  }
+                                  // ignore: use_build_context_synchronously
+                                  Navigator.pop(ctx);
+                                } catch (e) {
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('Failed to save coordinates: $e'), backgroundColor: Colors.red),
+                                    );
+                                  }
                                 }
-                                // ignore: use_build_context_synchronously
-                                Navigator.pop(ctx);
                               },
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF63C1E3),
